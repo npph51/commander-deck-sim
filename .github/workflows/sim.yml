@@ -1,0 +1,58 @@
+# Plays the games. Started by hand only (workflow_dispatch): no schedule, no push or pull-request trigger, no secrets.
+name: Deck sim
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'smoke, test (the deck against precons) or calib (precons among themselves)'
+        type: choice
+        options: [test, calib, smoke]
+        default: test
+      decklist:
+        description: 'The deck under test, in Forge .dck format (commander and main sections)'
+        default: ''
+      pods:
+        description: 'Tables of four (at most 200)'
+        default: '20'
+      games:
+        description: 'Games per table (at most 20)'
+        default: '5'
+      clock:
+        description: 'Seconds before a game is called a draw'
+        default: '420'
+      profile:
+        description: 'Forge AI profile for every seat'
+        type: choice
+        options: ['', Default, Cautious, Reckless, Experimental, Hard, Hardest]
+        default: ''
+      seed:
+        description: 'Seed for which precons sit at which table'
+        default: '1'
+permissions:
+  contents: read
+jobs:
+  sim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Get Forge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb bzip2 >/dev/null
+          mkdir forge && cd forge
+          gh release download -R Card-Forge/forge -p '*.tar.bz2'
+          tar -xjf *.tar.bz2 && rm -f *.tar.bz2
+      - name: Play
+        env:
+          MODE: ${{ inputs.mode }}
+          DECKLIST: ${{ inputs.decklist }}
+          PODS: ${{ inputs.pods }}
+          GAMES: ${{ inputs.games }}
+          CLOCK: ${{ inputs.clock }}
+          PROFILE: ${{ inputs.profile }}
+          SEED: ${{ inputs.seed }}
+        run: python3 run.py
