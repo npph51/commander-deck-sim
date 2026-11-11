@@ -81,7 +81,7 @@ def parse(out, decks, names):
     """One record per game from Forge's full log: winner, turns, and for our deck (seat `me`) what it did."""
     me = decks.index(DECK) + 1 if DECK in decks else 0
     games = []; cur = None
-    def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'lost_order': [], 'timeout': False}
+    def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'first': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'lost_order': [], 'timeout': False}
     cur = fresh()
     for line in out.splitlines():
         m = TURN.match(line)
@@ -93,6 +93,7 @@ def parse(out, decks, names):
         if m and int(m.group(2)) == me:
             card = m.group(4).strip()
             cur['cast'][card] = cur['cast'].get(card, 0) + 1
+            cur['first'].setdefault(card, cur['my_turns'])
             if m.group(1) == 'Land' and cur['my_turns'] <= 6: cur['lands_by_t6'] += 1
             if card == COMMANDER and cur['cmd_turn'] is None: cur['cmd_turn'] = cur['my_turns']
             continue
@@ -144,6 +145,19 @@ def play_stage(work, lib):
     os.makedirs('records', exist_ok=True)
     json.dump({'shard': SHARD, 'minutes': round((time.time() - t0) / 60, 1), 'games': recs, 'bad': bad}, open('records/%d.json' % SHARD, 'w'))
 
+def card_results(mine, deck_cards):
+    """Per card of our deck: [name, games it was played in, of which won, the turn of ours it usually first came down,
+    comparable games without it, of which won]. A card is only played in games that last long enough for it, and long
+    games are won more often, so the games without it are only those in which our deck had at least that many turns."""
+    rows = []
+    for c in deck_cards:
+        played = [g for g in mine if c in g['cast']]
+        turns = sorted(g.get('first', {}).get(c) or 0 for g in played)
+        t = turns[len(turns) // 2] if turns else None
+        rest = [g for g in mine if c not in g['cast'] and g['my_turns'] >= (t or 0)]
+        rows.append([c, len(played), sum(g['me_won'] for g in played), t, len(rest), sum(g['me_won'] for g in rest)])
+    return rows
+
 def merge_stage(work, lib):
     parts = [json.load(open(f)) for f in sorted(glob.glob('records/**/*.json', recursive=True))]
     stats = {}; total = draws = 0; ms = []; mine = []; casts = {}
@@ -178,6 +192,7 @@ def merge_stage(work, lib):
             # Share of games in which each card was played at least once; the lowest are the candidates to swap.
             'least_played': sorted(([c, round(100 * casts.get(c, 0) / n, 1)] for c in deck_cards), key=lambda x: x[1])[:20],
             'most_played': sorted(([c, round(100 * casts.get(c, 0) / n, 1)] for c in deck_cards), key=lambda x: -x[1])[:10],
+            'cards': card_results(mine, deck_cards),
         }
     print('=== DECK SIM SUMMARY ==='); print(json.dumps(summary, indent=1)); print('=== END SUMMARY ===')
 
