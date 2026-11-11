@@ -4,18 +4,18 @@ Plays four-player Commander games AI against AI with Forge's own `sim` mode (git
 repository only runs Forge's release, none of its code is here) and prints one JSON summary: the deck under test
 against three official preconstructed decks (mode test), or the precons among themselves (mode calib).
 """
-import json, os, random, re, subprocess, sys, time, glob, shutil, math
-from concurrent.futures import ThreadPoolExecutor
+import json, os, random, re, subprocess, sys, time, glob, math
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FORGE = os.environ.get('FORGE_DIR', os.path.join(os.getcwd(), 'forge'))
 MODE = os.environ.get('MODE', 'smoke')          # smoke | test | calib
+STAGE = os.environ.get('STAGE', 'all')           # play (one machine's share of the tables) | merge (all shares into one summary) | all
+SHARD = int(os.environ.get('SHARD', '0')); SHARDS = max(1, int(os.environ.get('SHARDS', '1')))   # this machine of how many
 DECK = 'deck.dck'                                  # the deck under test, written from DECKLIST
 DECKLIST = os.environ.get('DECKLIST', '')          # its list in Forge's .dck format, passed in with the run (never committed)
 PODS = min(200, int(os.environ.get('PODS', '2')))          # tables of four; each is one JVM start
 GAMES = min(20, int(os.environ.get('GAMES', '3')))        # games per table
 CLOCK = int(os.environ.get('CLOCK', '300'))      # seconds before Forge calls a game a draw
-PAR = int(os.environ.get('PAR', '1'))   # one JVM at a time: two on a 2-core runner ran four times slower each 
 SEED = int(os.environ.get('SEED', '1'))
 PROFILE = os.environ.get('PROFILE', '')          # Forge AI profile for every seat ('' = its default)
 # The benchmark: twelve ordinary Wizards precons of 2023-24 (no premium lines), as Forge ships their lists.
@@ -114,8 +114,7 @@ def wilson(k, n, z=1.96):
     c = (p + z * z / (2 * n)) / d; h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
     return [round(100 * (c - h), 1), round(100 * (c + h), 1)]
 
-def main():
-    work, lib = prepare()
+def tables(lib):
     rnd = random.Random(SEED)
     pods = []
     for _ in range(PODS):
@@ -123,33 +122,47 @@ def main():
         else: ds = [DECK] + rnd.sample(sorted(lib), 3)
         rnd.shuffle(ds)
         pods.append(ds)
+    return pods
+
+def play_stage(work, lib):
+    """This machine's tables (every SHARDS-th one), each game's record written to records/<shard>.json."""
+    pods = [ds for i, ds in enumerate(tables(lib)) if i % SHARDS == SHARD]
     if MODE == 'smoke':
         out, secs = play(work, pods[0], 1, quiet=False)
         lines = out.splitlines()
         print('=== SMOKE: one game with its full log, %d lines, %.0f s ===' % (len(lines), secs))
         print('\n'.join(lines[:60])); print('...'); print('\n'.join(lines[-120:]))
-    t0 = time.time()
-    with ThreadPoolExecutor(PAR) as ex:
-        results = list(ex.map(lambda ds: (ds, *play(work, ds, GAMES, quiet=False)), pods))
-    stats = {}; total = draws = 0; ms = []; bad = []; mine = []; casts = {}
-    for ds, out, secs in results:
+    t0 = time.time(); recs = []; bad = []; n = 0
+    for ds in pods:
+        try: out, secs = play(work, ds, GAMES, quiet=False)
+        except subprocess.TimeoutExpired: bad.append({'decks': ds, 'games_read': 0, 'tail': 'table timed out'}); continue
         gs = parse(out, ds, lib)
         if len(gs) < GAMES: bad.append({'decks': ds, 'games_read': len(gs), 'tail': out[-800:]})
         for g in gs:
-            total += 1; ms.append(g['ms'])
-            print('game', total, [lib.get(d, d) for d in ds], '->', lib.get(g['winner'], g['winner']), 'turn', g['turns'], round(g['ms'] / 1000), 's', 'TIMEOUT' if g['timeout'] else '', flush=True)
-            if DECK in ds:
-                mine.append(g)
-                for c, n in g['cast'].items(): casts[c] = casts.get(c, 0) + 1
-            if g['winner'] is None: draws += 1
-            for d in ds:
-                s = stats.setdefault(d, {'games': 0, 'wins': 0}); s['games'] += 1
-                if g['winner'] == d: s['wins'] += 1
+            n += 1; g['decks'] = ds; recs.append(g)
+            print('game', n, [lib.get(d, d) for d in ds], '->', lib.get(g['winner'], g['winner']), 'turn', g['turns'], round(g['ms'] / 1000), 's', 'TIMEOUT' if g['timeout'] else '', flush=True)
+    os.makedirs('records', exist_ok=True)
+    json.dump({'shard': SHARD, 'minutes': round((time.time() - t0) / 60, 1), 'games': recs, 'bad': bad}, open('records/%d.json' % SHARD, 'w'))
+
+def merge_stage(work, lib):
+    parts = [json.load(open(f)) for f in sorted(glob.glob('records/**/*.json', recursive=True))]
+    stats = {}; total = draws = 0; ms = []; mine = []; casts = {}
+    bad = [b for p in parts for b in p['bad']]
+    for g in (g for p in parts for g in p['games']):
+        ds = g['decks']; total += 1; ms.append(g['ms'])
+        if DECK in ds:
+            mine.append(g)
+            for c in g['cast']: casts[c] = casts.get(c, 0) + 1
+        if g['winner'] is None: draws += 1
+        for d in ds:
+            s = stats.setdefault(d, {'games': 0, 'wins': 0}); s['games'] += 1
+            if g['winner'] == d: s['wins'] += 1
     rows = [{'deck': lib.get(d, d), 'games': s['games'], 'wins': s['wins'], 'win_pct': round(100 * s['wins'] / s['games'], 1),
              'ci95': wilson(s['wins'], s['games'])} for d, s in sorted(stats.items(), key=lambda x: -x[1]['wins'] / max(1, x[1]['games']))]
     ms.sort()
     summary = {'mode': MODE, 'deck': DECK, 'pods': PODS, 'games_per_pod': GAMES, 'clock_s': CLOCK, 'profile': PROFILE or 'default',
-               'games': total, 'draws_or_timeouts': draws, 'wall_minutes': round((time.time() - t0) / 60, 1),
+               'machines': len(parts), 'machines_expected': SHARDS, 'games': total, 'games_expected': PODS * GAMES, 'draws_or_timeouts': draws,
+               'machine_minutes': [p['minutes'] for p in parts],
                'game_seconds_median': round(ms[len(ms) // 2] / 1000, 1) if ms else None,
                'game_seconds_p90': round(ms[int(len(ms) * .9)] / 1000, 1) if ms else None, 'decks': rows, 'incomplete_pods': bad[:5]}
     if mine:
@@ -167,5 +180,10 @@ def main():
             'most_played': sorted(([c, round(100 * casts.get(c, 0) / n, 1)] for c in deck_cards), key=lambda x: -x[1])[:10],
         }
     print('=== DECK SIM SUMMARY ==='); print(json.dumps(summary, indent=1)); print('=== END SUMMARY ===')
+
+def main():
+    work, lib = prepare()
+    if STAGE in ('play', 'all'): play_stage(work, lib)
+    if STAGE in ('merge', 'all'): merge_stage(work, lib)
 
 main()

@@ -8,7 +8,7 @@ preconstructed decks.
   tested deck the turn its commander was cast, lands played by turn 6 and how often each card was played.
 - The decklist under test is passed in when a run is started, in Forge's `.dck` format; none is stored here. The
   precons are the lists Forge ships.
-- `.github/workflows/sim.yml` runs it on GitHub Actions, by hand only.
+- `.github/workflows/sim.yml` runs it on GitHub Actions, by hand only: up to 20 machines play their share of the tables side by side, then one job merges their games into the summary. Forge's release is kept in the Actions cache.
 
 Forge is downloaded as its own release at run time; none of its code is in this repository. Results are computer play:
 they compare decks under the same AI and say nothing certain about a real table.
