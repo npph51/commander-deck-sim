@@ -2,7 +2,8 @@
 
 Plays four-player Commander games AI against AI with Forge's own `sim` mode (github.com/Card-Forge/forge, GPL; this
 repository only runs Forge's release, none of its code is here) and prints one JSON summary: the deck under test
-against three official preconstructed decks (mode test), or the precons among themselves (mode calib).
+against three official preconstructed decks (mode test), the precons among themselves (mode calib), or the premium
+precons and players' average decks each against three ordinary precons (mode ladder).
 """
 import json, os, random, re, signal, subprocess, sys, threading, time, glob, math
 
@@ -43,7 +44,34 @@ POOLS['standard'] = POOLS['classic'] + [
 POOLS['all'] = POOLS['standard'] + POOLS['strong']
 POOL = os.environ.get('POOL') or 'classic'
 if POOL not in POOLS: POOL = 'classic'
-PRECONS = POOLS[POOL]
+PRECONS = POOLS['all'] if os.environ.get('MODE') == 'ladder' else POOLS[POOL]
+
+# Player-built lists as Forge offers them for download: one "average" deck per commander (what players most often run
+# with it). AVERAGE (mode test): that commander's average deck is the deck under test, in place of a list passed in.
+# EXTRA (mode ladder): commanders whose average decks sit down as subjects, names separated by |.
+AVERAGE = (os.environ.get('AVERAGE') or '').strip()
+EXTRA = [x.strip() for x in (os.environ.get('EXTRA') or '').split('|') if x.strip()]
+AVERAGES_URL = 'https://github.com/Card-Forge/forge-extras/raw/refs/heads/main/decks/edhrec-average.zip'
+
+def average_decks(names):
+    """name -> the deck's text ('' when the collection has none for it), under one plain deck name each."""
+    import io, urllib.request, zipfile
+    f = 'averages.zip'
+    if not os.path.exists(f):
+        for attempt in range(3):
+            try:
+                urllib.request.urlretrieve(AVERAGES_URL, f); break
+            except Exception as e:
+                print('average decks: download failed,', e); time.sleep(5)
+    if not os.path.exists(f): return {n: '' for n in names}
+    z = zipfile.ZipFile(f)
+    key = lambda x: re.sub(r'[^a-z0-9]+', '', x.lower())
+    have = {key(os.path.basename(i)[:-4]): i for i in z.namelist() if i.endswith('.dck')}
+    out = {}
+    for n in names:
+        i = have.get(key(n)) or have.get(key(n.split(' // ')[0]))
+        out[n] = z.read(i).decode('utf-8', 'replace') if i else ''
+    return out
 
 COMMANDER = None   # the tested deck's commander, read from its file
 
@@ -64,8 +92,19 @@ def prepare():
         txt = re.sub(r'(?m)^Name=.*$', 'Name=' + p.replace(' - ', ' ').replace('!', ''), txt, count=1)
         open(os.path.join(work, out), 'w', encoding='utf-8').write(txt)
         lib[out] = p
-    if MODE != 'calib':
+    if MODE == 'ladder':
+        for n, text in average_decks(EXTRA).items():
+            if not text:
+                print('no average deck for:', n); continue
+            out = 'a_' + slug(n) + '.dck'
+            text = re.sub(r'(?m)^Name=.*$', 'Name=Average ' + re.sub(r'[^A-Za-z0-9 ]+', '', n), text, count=1)
+            open(os.path.join(work, out), 'w', encoding='utf-8').write(text)
+            lib[out] = 'AVG - ' + n
+    elif MODE != 'calib':
         text = DECKLIST.replace('\r', '')
+        if AVERAGE:
+            text = re.sub(r'(?m)^Name=.*$', 'Name=Deck', average_decks([AVERAGE])[AVERAGE], count=1)
+            if not text: print('=== NO AVERAGE DECK FOR THIS COMMANDER ===')
         if '\\n' in text and '\n' not in text: text = text.replace('\\n', '\n')
         if len(text) > 20000 or not re.search(r'(?i)\[main\]', text): sys.exit('no usable decklist was passed in')
         open(os.path.join(work, DECK), 'w', encoding='utf-8').write(text)
@@ -154,8 +193,12 @@ def wilson(k, n, z=1.96):
 def tables(lib):
     rnd = random.Random(SEED)
     pods = []
-    for _ in range(SKIP + PODS):
-        if MODE == 'calib': ds = rnd.sample(sorted(lib), 4)
+    # ladder: every premium precon and every average deck in turn against three ordinary precons, as a deck under test sits.
+    field = sorted(d for d, n in lib.items() if n in POOLS['standard'])
+    subjects = sorted(d for d in lib if d not in field)
+    for i in range(SKIP + PODS):
+        if MODE == 'ladder': ds = [subjects[i % len(subjects)]] + rnd.sample(field, 3)
+        elif MODE == 'calib': ds = rnd.sample(sorted(lib), 4)
         else: ds = [DECK] + rnd.sample(sorted(lib), 3)
         rnd.shuffle(ds)
         pods.append(ds)
@@ -229,12 +272,19 @@ def merge_stage(work, lib):
     rows = [{'deck': lib.get(d, d), 'games': s['games'], 'wins': s['wins'], 'win_pct': round(100 * s['wins'] / s['games'], 1),
              'ci95': wilson(s['wins'], s['games'])} for d, s in sorted(stats.items(), key=lambda x: -x[1]['wins'] / max(1, x[1]['games']))]
     ms.sort()
+    if MODE == 'ladder':
+        # Per group: the subjects' share of their own tables' games (an even deck wins a quarter).
+        for r in rows: r['group'] = 'average' if r['deck'].startswith('AVG - ') else 'strong' if r['deck'] in POOLS['strong'] else 'standard'
+        groups = {}
+        for r in rows:
+            g = groups.setdefault(r['group'], {'decks': 0, 'games': 0, 'wins': 0}); g['decks'] += 1; g['games'] += r['games']; g['wins'] += r['wins']
+        for g in groups.values(): g['win_pct'] = round(100 * g['wins'] / max(1, g['games']), 1); g['ci95'] = wilson(g['wins'], g['games'])
     summary = {'mode': MODE, 'pool': POOL, 'deck': DECK, 'pods': PODS, 'games_per_pod': GAMES, 'clock_s': CLOCK, 'profile': PROFILE or 'default',
                'machines': len(parts), 'machines_expected': SHARDS, 'workers': WORKERS, 'games': total, 'games_expected': PODS * GAMES, 'draws_or_timeouts': draws,
                'machine_minutes': [p['minutes'] for p in parts], 'budget_min': BUDGET, 'skip': SKIP,
                'tables_not_started': sum(p.get('skipped', 0) for p in parts),
                'game_seconds_median': round(ms[len(ms) // 2] / 1000, 1) if ms else None,
-               'game_seconds_p90': round(ms[int(len(ms) * .9)] / 1000, 1) if ms else None, 'decks': rows, 'incomplete_pods': bad[:5]}
+               'game_seconds_p90': round(ms[int(len(ms) * .9)] / 1000, 1) if ms else None, 'decks': rows, 'groups': groups if MODE == 'ladder' else None, 'average': AVERAGE or None, 'incomplete_pods': bad[:5]}
     if mine:
         n = len(mine); med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
         deck_cards = [re.sub(r'^\d+ ', '', l).split('|')[0].strip() for l in open(os.path.join(work, DECK), encoding='utf-8').read().split('[Main]')[-1].splitlines() if re.match(r'^1 ', l)]
