@@ -1,5 +1,7 @@
 # Plays the games. Started by hand only (workflow_dispatch): no schedule, no push or pull-request trigger, no secrets.
 name: Deck sim
+# The starter's own number for the run, so it finds its run among several (nothing else is in the name).
+run-name: Deck sim ${{ inputs.tag }}
 on:
   workflow_dispatch:
     inputs:
@@ -34,6 +36,9 @@ on:
       workers:
         description: 'Tables played side by side on each machine (1 to 4: a machine has four cores)'
         default: '1'
+      tag:
+        description: 'A number the starter gives the run, shown in its name'
+        default: ''
 permissions:
   contents: read
 env:
