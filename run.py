@@ -19,10 +19,27 @@ CLOCK = int(os.environ.get('CLOCK', '300'))      # seconds before Forge calls a 
 SEED = int(os.environ.get('SEED', '1'))
 WORKERS = max(1, min(8, int(os.environ.get('WORKERS') or 1)))   # tables played side by side on one machine (one JVM each)
 PROFILE = os.environ.get('PROFILE', '')          # Forge AI profile for every seat ('' = its default)
-# The benchmark: twelve ordinary Wizards precons of 2023-24 (no premium lines), as Forge ships their lists.
-PRECONS = ['BLC - Animated Army', 'BLC - Family Matters', 'BLC - Peace Offering', 'BLC - Squirreled Away',
-           'DSC - Death Toll', 'DSC - Endless Punishment', 'DSC - Jump Scare!', 'DSC - Miracle Worker',
-           'LCC - Ahoy Mateys', 'LCC - Blood Rites', 'LCC - Explorers of the Deep', 'LCC - Veloci-Ramp-Tor']
+# The benchmarks, as Forge ships the lists. "standard": the ordinary Wizards precons of late 2023 to 2026 (no premium
+# lines). "strong": the premium lines, built above an ordinary precon, for decks meant to play above that level.
+# "classic": the first twelve, kept so an old result can be played again. "all" (calib only): standard and strong together.
+POOLS = {
+    'classic': ['BLC - Animated Army', 'BLC - Family Matters', 'BLC - Peace Offering', 'BLC - Squirreled Away',
+                'DSC - Death Toll', 'DSC - Endless Punishment', 'DSC - Jump Scare!', 'DSC - Miracle Worker',
+                'LCC - Ahoy Mateys', 'LCC - Blood Rites', 'LCC - Explorers of the Deep', 'LCC - Veloci-Ramp-Tor'],
+    'strong': ['M3C - Creative Energy', 'M3C - Eldrazi Incursion', 'M3C - Graveyard Overdrive', 'M3C - Tricky Terrain',
+               '40K - Forces of the Imperium', '40K - Necron Dynasties', '40K - The Ruinous Powers', '40K - Tyranid Swarm',
+               'PIP - Hail, Caesar', 'PIP - Mutant Menace', 'PIP - Science!', 'PIP - Scrappy Survivors'],
+}
+POOLS['standard'] = POOLS['classic'] + [
+    'DRC - Eternal Might', 'DRC - Living Energy',
+    'TDC - Abzan Armor', 'TDC - Jeskai Striker', 'TDC - Mardu Surge', 'TDC - Sultai Arisen', 'TDC - Temur Roar',
+    'EOC - Counter Intelligence', 'EOC - World Shaper',
+    'ECC - Blight Curse', 'ECC - Dance of the Elements',
+    'SOC - Lorehold Spirit', 'SOC - Prismari Artistry', 'SOC - Quandrix Unlimited', 'SOC - Silverquill Influence', 'SOC - Witherbloom Pestilence']
+POOLS['all'] = POOLS['standard'] + POOLS['strong']
+POOL = os.environ.get('POOL') or 'classic'
+if POOL not in POOLS: POOL = 'classic'
+PRECONS = POOLS[POOL]
 
 COMMANDER = None   # the tested deck's commander, read from its file
 
@@ -190,7 +207,7 @@ def merge_stage(work, lib):
     rows = [{'deck': lib.get(d, d), 'games': s['games'], 'wins': s['wins'], 'win_pct': round(100 * s['wins'] / s['games'], 1),
              'ci95': wilson(s['wins'], s['games'])} for d, s in sorted(stats.items(), key=lambda x: -x[1]['wins'] / max(1, x[1]['games']))]
     ms.sort()
-    summary = {'mode': MODE, 'deck': DECK, 'pods': PODS, 'games_per_pod': GAMES, 'clock_s': CLOCK, 'profile': PROFILE or 'default',
+    summary = {'mode': MODE, 'pool': POOL, 'deck': DECK, 'pods': PODS, 'games_per_pod': GAMES, 'clock_s': CLOCK, 'profile': PROFILE or 'default',
                'machines': len(parts), 'machines_expected': SHARDS, 'workers': WORKERS, 'games': total, 'games_expected': PODS * GAMES, 'draws_or_timeouts': draws,
                'machine_minutes': [p['minutes'] for p in parts],
                'game_seconds_median': round(ms[len(ms) // 2] / 1000, 1) if ms else None,

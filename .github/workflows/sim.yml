@@ -33,6 +33,9 @@ on:
       seed:
         description: 'Seed for which precons sit at which table'
         default: '1'
+      pool:
+        description: 'Which official decks sit at the tables: classic (the first twelve), standard, strong, all (calib only)'
+        default: 'classic'
       workers:
         description: 'Tables played side by side on each machine (1 to 4: a machine has four cores)'
         default: '1'
@@ -50,6 +53,7 @@ env:
   PROFILE: ${{ inputs.profile }}
   SEED: ${{ inputs.seed }}
   WORKERS: ${{ inputs.workers }}
+  POOL: ${{ inputs.pool }}
 jobs:
   # Fetches Forge's release once (kept in the cache per release) and says how many machines play.
   setup:

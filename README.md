@@ -7,7 +7,8 @@ preconstructed decks.
   Magic: The Gathering rules engine, and prints a summary: win rates with their 95 % interval, game length, and for the
   tested deck the turn its commander was cast, lands played by turn 6 and how often each card was played.
 - The decklist under test is passed in when a run is started, in Forge's `.dck` format; none is stored here. The
-  precons are the lists Forge ships.
+  precons are the lists Forge ships, in pools: `standard` (the ordinary precons of late 2023 to 2026), `strong` (premium
+  lines) and `classic` (the first twelve).
 - `.github/workflows/sim.yml` runs it on GitHub Actions, by hand only: up to 20 machines play their share of the tables side by side, then one job merges their games into the summary. Forge's release is kept in the Actions cache.
 
 Forge is downloaded as its own release at run time; none of its code is in this repository. Results are computer play:
