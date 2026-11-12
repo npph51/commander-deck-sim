@@ -31,6 +31,9 @@ on:
       seed:
         description: 'Seed for which precons sit at which table'
         default: '1'
+      workers:
+        description: 'Tables played side by side on each machine (1 to 4: a machine has four cores)'
+        default: '1'
 permissions:
   contents: read
 env:
@@ -41,6 +44,7 @@ env:
   CLOCK: ${{ inputs.clock }}
   PROFILE: ${{ inputs.profile }}
   SEED: ${{ inputs.seed }}
+  WORKERS: ${{ inputs.workers }}
 jobs:
   # Fetches Forge's release once (kept in the cache per release) and says how many machines play.
   setup:

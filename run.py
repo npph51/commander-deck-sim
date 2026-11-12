@@ -17,6 +17,7 @@ PODS = min(200, int(os.environ.get('PODS', '2')))          # tables of four; eac
 GAMES = min(20, int(os.environ.get('GAMES', '3')))        # games per table
 CLOCK = int(os.environ.get('CLOCK', '300'))      # seconds before Forge calls a game a draw
 SEED = int(os.environ.get('SEED', '1'))
+WORKERS = max(1, min(8, int(os.environ.get('WORKERS') or 1)))   # tables played side by side on one machine (one JVM each)
 PROFILE = os.environ.get('PROFILE', '')          # Forge AI profile for every seat ('' = its default)
 # The benchmark: twelve ordinary Wizards precons of 2023-24 (no premium lines), as Forge ships their lists.
 PRECONS = ['BLC - Animated Army', 'BLC - Family Matters', 'BLC - Peace Offering', 'BLC - Squirreled Away',
@@ -59,7 +60,7 @@ def jar():
     if not js: sys.exit('no Forge jar in ' + FORGE + ': ' + ' '.join(os.listdir(FORGE))[:400])
     return js[0]
 
-def play(work, decks, games, quiet=True):
+def play(work, decks, games, quiet=True, slot=0):
     java = os.path.join(os.environ.get('JAVA_HOME_21_X64') or os.environ.get('JAVA_HOME') or '', 'bin', 'java')
     if not os.path.exists(java): java = 'java'
     cmd = ['xvfb-run', '-a', java, '-Xmx2600m', '-Djava.awt.headless=false', '-jar', jar(), 'sim', '-d', *decks,
@@ -67,7 +68,13 @@ def play(work, decks, games, quiet=True):
     if PROFILE: cmd += ['-a', *([PROFILE] * len(decks))]
     if quiet: cmd.append('-q')
     t = time.time()
-    r = subprocess.run(cmd, cwd=FORGE, capture_output=True, text=True, timeout=games * (CLOCK + 60) + 600)
+    # Tables side by side each get a home of their own, so two JVMs never write the same preference or cache files.
+    env = dict(os.environ)
+    if WORKERS > 1:
+        home = os.path.join(os.getcwd(), 'homes', str(slot)); os.makedirs(home, exist_ok=True)
+        env['HOME'] = home
+        cmd = cmd[:3] + ['-Duser.home=' + home] + cmd[3:]
+    r = subprocess.run(cmd, cwd=FORGE, capture_output=True, text=True, timeout=games * (CLOCK + 60) + 600, env=env)
     return r.stdout + '\n' + r.stderr[-3000:], time.time() - t
 
 RES = re.compile(r'Game Result: Game (\d+) ended in (\d+) ms\. (.*) has won!')
@@ -134,9 +141,18 @@ def play_stage(work, lib):
         print('=== SMOKE: one game with its full log, %d lines, %.0f s ===' % (len(lines), secs))
         print('\n'.join(lines[:60])); print('...'); print('\n'.join(lines[-120:]))
     t0 = time.time(); recs = []; bad = []; n = 0
-    for ds in pods:
-        try: out, secs = play(work, ds, GAMES, quiet=False)
-        except subprocess.TimeoutExpired: bad.append({'decks': ds, 'games_read': 0, 'tail': 'table timed out'}); continue
+    from concurrent.futures import ThreadPoolExecutor
+    import queue
+    slots = queue.Queue()
+    for k in range(WORKERS): slots.put(k)
+    def one(ds):
+        k = slots.get()
+        try: return ds, play(work, ds, GAMES, quiet=False, slot=k)[0]
+        except subprocess.TimeoutExpired: return ds, None
+        finally: slots.put(k)
+    with ThreadPoolExecutor(WORKERS) as ex: done = list(ex.map(one, pods))
+    for ds, out in done:
+        if out is None: bad.append({'decks': ds, 'games_read': 0, 'tail': 'table timed out'}); continue
         gs = parse(out, ds, lib)
         if len(gs) < GAMES: bad.append({'decks': ds, 'games_read': len(gs), 'tail': out[-800:]})
         for g in gs:
@@ -175,7 +191,7 @@ def merge_stage(work, lib):
              'ci95': wilson(s['wins'], s['games'])} for d, s in sorted(stats.items(), key=lambda x: -x[1]['wins'] / max(1, x[1]['games']))]
     ms.sort()
     summary = {'mode': MODE, 'deck': DECK, 'pods': PODS, 'games_per_pod': GAMES, 'clock_s': CLOCK, 'profile': PROFILE or 'default',
-               'machines': len(parts), 'machines_expected': SHARDS, 'games': total, 'games_expected': PODS * GAMES, 'draws_or_timeouts': draws,
+               'machines': len(parts), 'machines_expected': SHARDS, 'workers': WORKERS, 'games': total, 'games_expected': PODS * GAMES, 'draws_or_timeouts': draws,
                'machine_minutes': [p['minutes'] for p in parts],
                'game_seconds_median': round(ms[len(ms) // 2] / 1000, 1) if ms else None,
                'game_seconds_p90': round(ms[int(len(ms) * .9)] / 1000, 1) if ms else None, 'decks': rows, 'incomplete_pods': bad[:5]}
