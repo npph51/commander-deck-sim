@@ -42,6 +42,12 @@ on:
       tag:
         description: 'A number the starter gives the run, shown in its name'
         default: ''
+      budget:
+        description: 'Minutes a machine plays before it starts no new table (0 = no limit); tables still playing 10 minutes later hand in what they finished'
+        default: '0'
+      skip:
+        description: 'Tables of the seeded deal to pass over, so a second part of a test plays the next ones'
+        default: '0'
 permissions:
   contents: read
 env:
@@ -54,6 +60,8 @@ env:
   SEED: ${{ inputs.seed }}
   WORKERS: ${{ inputs.workers }}
   POOL: ${{ inputs.pool }}
+  BUDGET: ${{ inputs.budget }}
+  SKIP: ${{ inputs.skip }}
 jobs:
   # Fetches Forge's release once (kept in the cache per release) and says how many machines play.
   setup:
@@ -109,6 +117,8 @@ jobs:
           mkdir forge && tar -xjf forge.tar.bz2 -C forge && rm -f forge.tar.bz2
           python3 run.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Also when the machine was cut off: its games so far are on disk.
+        if: always()
         with:
           name: records-${{ matrix.shard }}
           path: records/

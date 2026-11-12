@@ -4,7 +4,7 @@ Plays four-player Commander games AI against AI with Forge's own `sim` mode (git
 repository only runs Forge's release, none of its code is here) and prints one JSON summary: the deck under test
 against three official preconstructed decks (mode test), or the precons among themselves (mode calib).
 """
-import json, os, random, re, subprocess, sys, time, glob, math
+import json, os, random, re, signal, subprocess, sys, threading, time, glob, math
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FORGE = os.environ.get('FORGE_DIR', os.path.join(os.getcwd(), 'forge'))
@@ -18,6 +18,10 @@ GAMES = min(20, int(os.environ.get('GAMES', '3')))        # games per table
 CLOCK = int(os.environ.get('CLOCK', '300'))      # seconds before Forge calls a game a draw
 SEED = int(os.environ.get('SEED', '1'))
 WORKERS = max(1, min(8, int(os.environ.get('WORKERS') or 1)))   # tables played side by side on one machine (one JVM each)
+# A machine's time budget in minutes (0 = none): past it no new table is started, and GRACE minutes later the tables
+# still playing are stopped and hand in the games they finished, so one stalled table never holds the whole run up.
+BUDGET = max(0, int(os.environ.get('BUDGET') or 0)); GRACE = 10
+SKIP = max(0, min(2000, int(os.environ.get('SKIP') or 0)))   # tables of the seeded deal to pass over: a second part plays the next ones
 PROFILE = os.environ.get('PROFILE', '')          # Forge AI profile for every seat ('' = its default)
 # The benchmarks, as Forge ships the lists. "standard": the ordinary Wizards precons of late 2023 to 2026 (no premium
 # lines). "strong": the premium lines, built above an ordinary precon, for decks meant to play above that level.
@@ -77,7 +81,7 @@ def jar():
     if not js: sys.exit('no Forge jar in ' + FORGE + ': ' + ' '.join(os.listdir(FORGE))[:400])
     return js[0]
 
-def play(work, decks, games, quiet=True, slot=0):
+def play(work, decks, games, quiet=True, slot=0, limit=None):
     java = os.path.join(os.environ.get('JAVA_HOME_21_X64') or os.environ.get('JAVA_HOME') or '', 'bin', 'java')
     if not os.path.exists(java): java = 'java'
     cmd = ['xvfb-run', '-a', java, '-Xmx2600m', '-Djava.awt.headless=false', '-jar', jar(), 'sim', '-d', *decks,
@@ -91,8 +95,16 @@ def play(work, decks, games, quiet=True, slot=0):
         home = os.path.join(os.getcwd(), 'homes', str(slot)); os.makedirs(home, exist_ok=True)
         env['HOME'] = home
         cmd = cmd[:3] + ['-Duser.home=' + home] + cmd[3:]
-    r = subprocess.run(cmd, cwd=FORGE, capture_output=True, text=True, timeout=games * (CLOCK + 60) + 600, env=env)
-    return r.stdout + '\n' + r.stderr[-3000:], time.time() - t
+    # Its own process group, so a table stopped at the limit takes its JVM with it and what it printed so far is kept.
+    most = games * (CLOCK + 60) + 600
+    p = subprocess.Popen(cmd, cwd=FORGE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
+    try: out, err = p.communicate(timeout=most if limit is None else max(30, min(most, limit)))
+    except subprocess.TimeoutExpired:
+        try: os.killpg(p.pid, signal.SIGKILL)
+        except OSError: pass
+        out, err = p.communicate()
+        return (out or '') + '\n=== TABLE STOPPED AT THE TIME LIMIT ===\n', time.time() - t
+    return out + '\n' + err[-3000:], time.time() - t
 
 RES = re.compile(r'Game Result: Game (\d+) ended in (\d+) ms\. (.*) has won!')
 DRAW = re.compile(r'Game Result: Game (\d+) ended in a Draw! Took (\d+) ms')
@@ -142,12 +154,12 @@ def wilson(k, n, z=1.96):
 def tables(lib):
     rnd = random.Random(SEED)
     pods = []
-    for _ in range(PODS):
+    for _ in range(SKIP + PODS):
         if MODE == 'calib': ds = rnd.sample(sorted(lib), 4)
         else: ds = [DECK] + rnd.sample(sorted(lib), 3)
         rnd.shuffle(ds)
         pods.append(ds)
-    return pods
+    return pods[SKIP:]
 
 def play_stage(work, lib):
     """This machine's tables (every SHARDS-th one), each game's record written to records/<shard>.json."""
@@ -157,26 +169,36 @@ def play_stage(work, lib):
         lines = out.splitlines()
         print('=== SMOKE: one game with its full log, %d lines, %.0f s ===' % (len(lines), secs))
         print('\n'.join(lines[:60])); print('...'); print('\n'.join(lines[-120:]))
-    t0 = time.time(); recs = []; bad = []; n = 0
+    t0 = time.time(); recs = []; bad = []; skipped = []
     from concurrent.futures import ThreadPoolExecutor
     import queue
-    slots = queue.Queue()
+    slots = queue.Queue(); lock = threading.Lock()
     for k in range(WORKERS): slots.put(k)
+    os.makedirs('records', exist_ok=True)
+    def save():
+        # After every table, so a machine that is cut off still hands in what it played.
+        tmp = 'records/%d.json.tmp' % SHARD
+        json.dump({'shard': SHARD, 'minutes': round((time.time() - t0) / 60, 1), 'games': recs, 'bad': bad, 'skipped': len(skipped)}, open(tmp, 'w'))
+        os.replace(tmp, 'records/%d.json' % SHARD)
     def one(ds):
         k = slots.get()
-        try: return ds, play(work, ds, GAMES, quiet=False, slot=k)[0]
-        except subprocess.TimeoutExpired: return ds, None
+        try:
+            left = (BUDGET + GRACE) * 60 - (time.time() - t0) if BUDGET else None
+            if BUDGET and time.time() - t0 > BUDGET * 60:
+                with lock: skipped.append(ds); save()
+                return
+            out = play(work, ds, GAMES, quiet=False, slot=k, limit=left)[0]
+            gs = parse(out, ds, lib)
+            with lock:
+                if len(gs) < GAMES: bad.append({'decks': ds, 'games_read': len(gs), 'tail': out[-800:]})
+                for g in gs:
+                    g['decks'] = ds; recs.append(g)
+                    print('game', len(recs), [lib.get(d, d) for d in ds], '->', lib.get(g['winner'], g['winner']), 'turn', g['turns'], round(g['ms'] / 1000), 's', 'TIMEOUT' if g['timeout'] else '', flush=True)
+                save()
         finally: slots.put(k)
-    with ThreadPoolExecutor(WORKERS) as ex: done = list(ex.map(one, pods))
-    for ds, out in done:
-        if out is None: bad.append({'decks': ds, 'games_read': 0, 'tail': 'table timed out'}); continue
-        gs = parse(out, ds, lib)
-        if len(gs) < GAMES: bad.append({'decks': ds, 'games_read': len(gs), 'tail': out[-800:]})
-        for g in gs:
-            n += 1; g['decks'] = ds; recs.append(g)
-            print('game', n, [lib.get(d, d) for d in ds], '->', lib.get(g['winner'], g['winner']), 'turn', g['turns'], round(g['ms'] / 1000), 's', 'TIMEOUT' if g['timeout'] else '', flush=True)
-    os.makedirs('records', exist_ok=True)
-    json.dump({'shard': SHARD, 'minutes': round((time.time() - t0) / 60, 1), 'games': recs, 'bad': bad}, open('records/%d.json' % SHARD, 'w'))
+    with ThreadPoolExecutor(WORKERS) as ex: list(ex.map(one, pods))
+    with lock: save()
+    print('machine %d: %d games of %d tables in %.0f min, %d tables not started (time budget), %d cut short' % (SHARD, len(recs), len(pods), (time.time() - t0) / 60, len(skipped), len(bad)), flush=True)
 
 def card_results(mine, deck_cards):
     """Per card of our deck: [name, games it was played in, of which won, the turn of ours it usually first came down,
@@ -209,7 +231,8 @@ def merge_stage(work, lib):
     ms.sort()
     summary = {'mode': MODE, 'pool': POOL, 'deck': DECK, 'pods': PODS, 'games_per_pod': GAMES, 'clock_s': CLOCK, 'profile': PROFILE or 'default',
                'machines': len(parts), 'machines_expected': SHARDS, 'workers': WORKERS, 'games': total, 'games_expected': PODS * GAMES, 'draws_or_timeouts': draws,
-               'machine_minutes': [p['minutes'] for p in parts],
+               'machine_minutes': [p['minutes'] for p in parts], 'budget_min': BUDGET, 'skip': SKIP,
+               'tables_not_started': sum(p.get('skipped', 0) for p in parts),
                'game_seconds_median': round(ms[len(ms) // 2] / 1000, 1) if ms else None,
                'game_seconds_p90': round(ms[int(len(ms) * .9)] / 1000, 1) if ms else None, 'decks': rows, 'incomplete_pods': bad[:5]}
     if mine:
