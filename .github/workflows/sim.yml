@@ -51,6 +51,9 @@ on:
       extra:
         description: 'ladder: commanders whose average decks sit down beside the premium precons, names separated by |'
         default: ''
+      swaps:
+        description: 'test: card swaps to try side by side, as JSON [[card out, card in], ...]; each table plays a random half of them'
+        default: ''
       skip:
         description: 'Tables of the seeded deal to pass over, so a second part of a test plays the next ones'
         default: '0'
@@ -68,6 +71,7 @@ env:
   POOL: ${{ inputs.pool }}
   BUDGET: ${{ inputs.budget }}
   SKIP: ${{ inputs.skip }}
+  SWAPS: ${{ inputs.swaps }}
   AVERAGE: ${{ inputs.average }}
   EXTRA: ${{ inputs.extra }}
 jobs:

@@ -49,6 +49,11 @@ PRECONS = POOLS['all'] if os.environ.get('MODE') == 'ladder' else POOLS[POOL]
 # Player-built lists as Forge offers them for download: one "average" deck per commander (what players most often run
 # with it). AVERAGE (mode test): that commander's average deck is the deck under test, in place of a list passed in.
 # EXTRA (mode ladder): commanders whose average decks sit down as subjects, names separated by |.
+# A trial (mode test): card swaps to try side by side, as JSON [[card out, card in], ...] in the deck file's own names
+# (at most 16). Each table plays the deck with a random half of them made (every swap at half the tables, seeded), and
+# the summary says how the deck finished per combination, so each swap's own effect can be worked out from one run.
+try: SWAPS = [[str(a), str(b)] for a, b in json.loads(os.environ.get('SWAPS') or '[]')][:16]
+except Exception: SWAPS = []
 AVERAGE = (os.environ.get('AVERAGE') or '').strip()
 EXTRA = [x.strip() for x in (os.environ.get('EXTRA') or '').split('|') if x.strip()]
 AVERAGES_URL = 'https://github.com/Card-Forge/forge-extras/raw/refs/heads/main/decks/edhrec-average.zip'
@@ -203,9 +208,9 @@ DMG = re.compile(r'\{by\|(?:Ai\((\d+)\)-[^|]*)?\|([^|]*)\|(\d+)\|Ai\((\d+)\)-.*\
 MULL = re.compile(r'^Mulligan: .*Ai\((\d+)\)-.* mulliganed ')   # not the line for a hand that was kept
 TOP = 6   # draws after the opening hand that still count as the top of the shuffled deck
 
-def parse(out, decks, names):
+def parse(out, decks, names, mine=DECK):
     """One record per game from Forge's full log: winner, turns, and for our deck (seat `me`) what it did."""
-    me = decks.index(DECK) + 1 if DECK in decks else 0
+    me = decks.index(mine) + 1 if mine in decks else 0
     games = []; cur = None
     def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'first': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'lost_order': [], 'timeout': False,
                           'open': [], 'top': [], 'mull': 0, 'dl': False, 'dealt': {}, 'hit': 0, 'hit6': 0}
@@ -266,6 +271,28 @@ def wilson(k, n, z=1.96):
     c = (p + z * z / (2 * n)) / d; h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
     return [round(100 * (c - h), 1), round(100 * (c + h), 1)]
 
+def masks(n):
+    """Which swaps each of this run's n tables plays with: bit j = swap j made. Every swap at half the tables."""
+    out = [0] * n
+    for j in range(len(SWAPS)):
+        r = random.Random('%d-%d-%d' % (SEED, SKIP, j))
+        for i in r.sample(range(n), n // 2): out[i] |= 1 << j
+    return out
+
+def swapped(work, mask):
+    """The deck file for a table that plays with these swaps made (written once per combination)."""
+    if not mask: return DECK
+    name = 'deck_m%d.dck' % mask
+    f = os.path.join(work, name)
+    if not os.path.exists(f):
+        lines = open(os.path.join(work, DECK), encoding='utf-8').read().split('\n')
+        for j, (out, into) in enumerate(SWAPS):
+            if not mask >> j & 1: continue
+            for k, l in enumerate(lines):
+                if l.strip() == '1 ' + out: lines[k] = '1 ' + into; break
+        open(f, 'w', encoding='utf-8').write('\n'.join(lines))
+    return name
+
 def tables(lib):
     rnd = random.Random(SEED)
     pods = []
@@ -282,7 +309,9 @@ def tables(lib):
 
 def play_stage(work, lib):
     """This machine's tables (every SHARDS-th one), each game's record written to records/<shard>.json."""
-    pods = [ds for i, ds in enumerate(tables(lib)) if i % SHARDS == SHARD]
+    every = tables(lib); ms = masks(len(every)) if SWAPS and MODE == 'test' else [0] * len(every)
+    mask_of = {id(ds): m for ds, m in zip(every, ms)}
+    pods = [ds for i, ds in enumerate(every) if i % SHARDS == SHARD]
     if MODE != 'calib' and MODE != 'ladder' and os.environ.get('LOGMORE', '1') != '0': log_more()
     if MODE == 'smoke':
         out, secs = play(work, pods[0], 1, quiet=False)
@@ -311,18 +340,22 @@ def play_stage(work, lib):
             if BUDGET and time.time() - t0 > BUDGET * 60:
                 with lock: skipped.append(ds); save()
                 return
-            out = play(work, ds, GAMES, quiet=False, slot=k, limit=left)[0]
-            gs = parse(out, ds, lib)
+            mask = mask_of.get(id(ds), 0); mine = swapped(work, mask)
+            seats = [mine if d == DECK else d for d in ds]
+            out = play(work, seats, GAMES, quiet=False, slot=k, limit=left)[0]
+            gs = parse(out, seats, lib, mine)
             global LOGMORE
             if LOGMORE and not gs and 'TABLE STOPPED' not in out and re.search(r'Exception|Error', out[-3000:]):
                 print('fuller log: a table failed with it, playing on without:', out[-400:].replace('\n', ' | '), flush=True)
                 LOGMORE = None
-                out = play(work, ds, GAMES, quiet=False, slot=k, limit=left)[0]
-                gs = parse(out, ds, lib)
+                out = play(work, seats, GAMES, quiet=False, slot=k, limit=left)[0]
+                gs = parse(out, seats, lib, mine)
             with lock:
                 if len(gs) < GAMES: bad.append({'decks': ds, 'games_read': len(gs), 'tail': out[-800:]})
                 for g in gs:
-                    g['decks'] = ds; recs.append(g)
+                    # Whatever combination it played, the record names our deck the same way.
+                    if g['winner'] == mine: g['winner'] = DECK
+                    g['decks'] = ds; g['mask'] = mask; recs.append(g)
                     print('game', len(recs), [lib.get(d, d) for d in ds], '->', lib.get(g['winner'], g['winner']), 'turn', g['turns'], round(g['ms'] / 1000), 's', 'TIMEOUT' if g['timeout'] else '', flush=True)
                 save()
         finally: slots.put(k)
@@ -436,6 +469,14 @@ def merge_stage(work, lib):
             # Per opponent: [name, games at one table with it, of which our deck won, of which it won, games our deck was out before it].
             'vs': versus(mine, lib),
         }
+        if SWAPS and any(g.get('mask') for g in mine):
+            # Per combination of swaps played: [mask, games, of which won, second, third, first out].
+            by = {}
+            for g in mine:
+                r = by.setdefault(g.get('mask', 0), [g.get('mask', 0), 0, 0, 0, 0, 0]); r[1] += 1
+                if g['me_won']: r[2] += 1
+                elif g['me'] in g['lost_order'] and g['lost_order'].index(g['me']) < 3: r[5 - g['lost_order'].index(g['me'])] += 1
+            summary['our_deck']['trial'] = {'swaps': SWAPS, 'rows': sorted(by.values())}
         gs, rows = draw_results(mine, deck_cards)
         if len(gs) >= 20:
             dealt = {}
