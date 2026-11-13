@@ -441,6 +441,17 @@ def levers(mine):
         out['pressure'] = {'groups': ['under 5 damage taken by its turn 6', '5 to 14', '15 or more'], 'rows': split(dl, lambda g: 0 if g['hit6'] < 5 else 1 if g['hit6'] < 15 else 2, 3)}
     return out
 
+def first_cards(mine):
+    """Game by game, where the deck finished and which cards were the top of its shuffled deck (the opening hand it
+    kept and the next TOP draws): {'cards': [names], 'rows': [[place, card, card, ...]]} with cards as places in the
+    list. The shuffle decides these, so they say what kind of card the deck does better for having early."""
+    names = {}; rows = []
+    for g in mine:
+        p = place_of(g)
+        if not g.get('dl') or p is None: continue
+        rows.append([p] + [names.setdefault(c, len(names)) for c in g['open'] + g['top']])
+    return {'cards': list(names), 'rows': rows}
+
 def table_rows(mine):
     by = {}
     for g in mine:
@@ -544,6 +555,7 @@ def merge_stage(work, lib):
                 # Damage our cards dealt to the other players: [card, games it dealt any, damage in all].
                 'dealt': sorted(dealt.values(), key=lambda x: -x[2])[:25],
                 'why': why(gs),
+                'first': first_cards(mine),
             })
     print('=== DECK SIM SUMMARY ==='); print(json.dumps(summary, indent=1)); print('=== END SUMMARY ===')
 
