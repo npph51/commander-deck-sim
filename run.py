@@ -498,6 +498,21 @@ def held_results(mine, deck_cards):
     return rows
 HELD_TURNS = 8
 
+def field_rows(mine, lib):
+    """The tables our deck sat at, by the three other decks: [deck, deck, deck, games with a winner, of which our deck
+    won, won by the first, the second, the third]. What a strength per official deck is fitted on, over every run."""
+    by = {}
+    for g in mine:
+        if not g.get('winner'): continue
+        opp = sorted(lib.get(d, d) for d in g['decks'] if d != DECK)
+        if len(opp) != 3: continue
+        r = by.setdefault(tuple(opp), [*opp, 0, 0, 0, 0, 0]); r[3] += 1
+        if g['me_won']: r[4] += 1
+        else:
+            w = lib.get(g['winner'], g['winner'])
+            if w in opp: r[5 + opp.index(w)] += 1
+    return sorted(by.values())
+
 def table_rows(mine):
     by = {}
     for g in mine:
@@ -577,6 +592,7 @@ def merge_stage(work, lib):
             # Per opponent: [name, games at one table with it, of which our deck won, of which it won, games our deck was out before it].
             'vs': versus(mine, lib),
             'levers': levers(mine),
+            'field': field_rows(mine, lib),
             # Per table of the deal (its place in it, the swaps it played): [table, mask, games, won, second, third, first out].
             # The same table of another run of this deck started from the same shuffles (seeded).
             'tables': table_rows(mine),
