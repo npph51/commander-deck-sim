@@ -54,6 +54,11 @@ PRECONS = POOLS['all'] if os.environ.get('MODE') == 'ladder' else POOLS[POOL]
 # the summary says how the deck finished per combination, so each swap's own effect can be worked out from one run.
 try: SWAPS = [[str(a), str(b)] for a, b in json.loads(os.environ.get('SWAPS') or '[]')][:16]
 except Exception: SWAPS = []
+# Every table plays on its own fixed random seed (from SEED and the table's place in the deal), so the same table of
+# another run of this deck starts from the same shuffles: two versions of a list then meet the same opening hands at
+# the same tables, which takes luck out of the comparison. '0' = Forge's own random seed, as before.
+FSEED = os.environ.get('FSEED', '1') != '0'
+def table_seed(i): return 1 + (SEED * 100003 + i * 7919) % 2000000000
 AVERAGE = (os.environ.get('AVERAGE') or '').strip()
 EXTRA = [x.strip() for x in (os.environ.get('EXTRA') or '').split('|') if x.strip()]
 AVERAGES_URL = 'https://github.com/Card-Forge/forge-extras/raw/refs/heads/main/decks/edhrec-average.zip'
@@ -171,11 +176,12 @@ def log_more():
     except Exception as e:
         print('fuller log: not available,', repr(e)[:300], flush=True)
 
-def play(work, decks, games, quiet=True, slot=0, limit=None):
+def play(work, decks, games, quiet=True, slot=0, limit=None, seed=None):
     java = java_bin()
     run = [*LOGMORE[0], '-cp', LOGMORE[1], LOGMORE[2]] if LOGMORE else ['-jar', jar()]
     cmd = ['xvfb-run', '-a', java, '-Xmx2600m', '-Djava.awt.headless=false', *run, 'sim', '-d', *decks,
            '-D', work + os.sep, '-f', 'commander', '-n', str(games), '-c', str(CLOCK)]
+    if seed: cmd += ['-s', str(seed)]
     if PROFILE: cmd += ['-a', *([PROFILE] * len(decks))]
     if quiet: cmd.append('-q')
     t = time.time()
@@ -212,7 +218,7 @@ def parse(out, decks, names, mine=DECK):
     """One record per game from Forge's full log: winner, turns, and for our deck (seat `me`) what it did."""
     me = decks.index(mine) + 1 if mine in decks else 0
     games = []; cur = None
-    def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'first': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'lost_order': [], 'timeout': False,
+    def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'first': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'early': 0, 'lost_order': [], 'timeout': False,
                           'open': [], 'top': [], 'mull': 0, 'dl': False, 'dealt': {}, 'hit': 0, 'hit6': 0}
     cur = fresh()
     for line in out.splitlines():
@@ -227,6 +233,7 @@ def parse(out, decks, names, mine=DECK):
             cur['cast'][card] = cur['cast'].get(card, 0) + 1
             cur['first'].setdefault(card, cur['my_turns'])
             if m.group(1) == 'Land' and cur['my_turns'] <= 6: cur['lands_by_t6'] += 1
+            if m.group(1) != 'Land' and cur['my_turns'] <= 4: cur['early'] += 1
             if card == COMMANDER and cur['cmd_turn'] is None: cur['cmd_turn'] = cur['my_turns']
             continue
         m = MOVE.match(line)
@@ -311,6 +318,7 @@ def play_stage(work, lib):
     """This machine's tables (every SHARDS-th one), each game's record written to records/<shard>.json."""
     every = tables(lib); ms = masks(len(every)) if SWAPS and MODE == 'test' else [0] * len(every)
     mask_of = {id(ds): m for ds, m in zip(every, ms)}
+    seed_of = {id(ds): table_seed(SKIP + i) for i, ds in enumerate(every)} if FSEED else {}
     pods = [ds for i, ds in enumerate(every) if i % SHARDS == SHARD]
     if MODE != 'calib' and MODE != 'ladder' and os.environ.get('LOGMORE', '1') != '0': log_more()
     if MODE == 'smoke':
@@ -322,6 +330,11 @@ def play_stage(work, lib):
         print('\n'.join([l for l in lines if l.startswith(('Damage:', 'Mulligan:'))][:12]))
         g = parse(out, pods[0], lib)
         print('=== SMOKE: read from it ===', json.dumps(g)[:3000])
+        # Does a seed repeat a game? The same table twice on one seed, once on another: opening hands and outcomes.
+        for label, sd in (('seed 4242', 4242), ('seed 4242 again', 4242), ('seed 99', 99)):
+            o2, _ = play(work, pods[0], 2, quiet=False, seed=sd)
+            for n, x in enumerate(parse(o2, pods[0], lib)):
+                print('=== SEED CHECK %s, game %d: open %s | top %s | winner %s | turns %s | lost %s' % (label, n + 1, sorted(x['open']), x['top'], x['winner'], x['turns'], x['lost_order']), flush=True)
     t0 = time.time(); recs = []; bad = []; skipped = []
     from concurrent.futures import ThreadPoolExecutor
     import queue
@@ -342,13 +355,14 @@ def play_stage(work, lib):
                 return
             mask = mask_of.get(id(ds), 0); mine = swapped(work, mask)
             seats = [mine if d == DECK else d for d in ds]
-            out = play(work, seats, GAMES, quiet=False, slot=k, limit=left)[0]
+            seed = seed_of.get(id(ds))
+            out = play(work, seats, GAMES, quiet=False, slot=k, limit=left, seed=seed)[0]
             gs = parse(out, seats, lib, mine)
             global LOGMORE
             if LOGMORE and not gs and 'TABLE STOPPED' not in out and re.search(r'Exception|Error', out[-3000:]):
                 print('fuller log: a table failed with it, playing on without:', out[-400:].replace('\n', ' | '), flush=True)
                 LOGMORE = None
-                out = play(work, seats, GAMES, quiet=False, slot=k, limit=left)[0]
+                out = play(work, seats, GAMES, quiet=False, slot=k, limit=left, seed=seed)[0]
                 gs = parse(out, seats, lib, mine)
             with lock:
                 if len(gs) < GAMES: bad.append({'decks': ds, 'games_read': len(gs), 'tail': out[-800:]})
@@ -397,6 +411,34 @@ def why(gs):
                 'commander_cast_pct': round(100 * len(cmd) / n, 1), 'commander_turn': round(sum(cmd) / len(cmd), 2) if cmd else None,
                 'damage_taken_by_turn_6': avg(lambda g: g['hit6']), 'damage_taken': avg(lambda g: g['hit']), 'our_turns': avg(lambda g: g['my_turns'])}
     return {'won': side([g for g in gs if g['me_won']]), 'not_won': side([g for g in gs if not g['me_won']])}
+
+def place_of(g):
+    """0 won, 1 second, 2 third, 3 first out; None for a game that was not played out."""
+    if g['me_won']: return 0
+    if g['me'] in g['lost_order'] and g['lost_order'].index(g['me']) < 3: return 3 - g['lost_order'].index(g['me'])
+    return None
+
+def levers(mine):
+    """What the deck's results hang on: the games split by what happened early, each group as
+    [games, won, second, third, first out]. Fixed cut points, so the groups of several runs add up."""
+    def split(gs, f, n):
+        out = [[0, 0, 0, 0, 0] for _ in range(n)]
+        for g in gs:
+            k = f(g); p = place_of(g)
+            if k is None or p is None: continue
+            out[k][0] += 1; out[k][1 + p] += 1
+        return out
+    dl = [g for g in mine if g.get('dl')]
+    cmd = lambda g: 2 if g['cmd_turn'] is None or g['cmd_turn'] >= 7 else 0 if g['cmd_turn'] <= 4 else 1
+    out = {
+        'lands': {'groups': ['4 or fewer lands by its turn 6', '5 lands', '6 or more'], 'rows': split(mine, lambda g: 0 if g['lands_by_t6'] <= 4 else 1 if g['lands_by_t6'] == 5 else 2, 3)},
+        'commander': {'groups': ['commander by its turn 4', 'on turn 5 or 6', 'later or never'], 'rows': split(mine, cmd, 3)},
+        'early': {'groups': ['no or one spell by its turn 4', '2 or 3 spells', '4 or more'], 'rows': split(mine, lambda g: 0 if g['early'] <= 1 else 1 if g['early'] <= 3 else 2, 3)},
+    }
+    if len(dl) >= 20:
+        out['mulligan'] = {'groups': ['kept its first hand', 'took a mulligan'], 'rows': split(dl, lambda g: 0 if not g['mull'] else 1, 2)}
+        out['pressure'] = {'groups': ['under 5 damage taken by its turn 6', '5 to 14', '15 or more'], 'rows': split(dl, lambda g: 0 if g['hit6'] < 5 else 1 if g['hit6'] < 15 else 2, 3)}
+    return out
 
 def places(mine):
     out = [0, 0, 0, 0]
@@ -468,6 +510,7 @@ def merge_stage(work, lib):
             'win_turn_median': med([g['turns'] for g in mine if g['me_won']]),
             # Per opponent: [name, games at one table with it, of which our deck won, of which it won, games our deck was out before it].
             'vs': versus(mine, lib),
+            'levers': levers(mine),
         }
         if SWAPS and any(g.get('mask') for g in mine):
             # Per combination of swaps played: [mask, games, of which won, second, third, first out].
