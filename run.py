@@ -120,10 +120,56 @@ def jar():
     if not js: sys.exit('no Forge jar in ' + FORGE + ': ' + ' '.join(os.listdir(FORGE))[:400])
     return js[0]
 
+def java_bin(name='java'):
+    j = os.path.join(os.environ.get('JAVA_HOME_21_X64') or os.environ.get('JAVA_HOME') or '', 'bin', name)
+    return j if os.path.exists(j) else name
+
+# Forge's game log leaves out which cards a player draws (it has the event, its log writer drops it) and who controls
+# the card that dealt damage. log_more compiles that one file of the release's own source with both added, at run time
+# (nothing of Forge is kept here), and puts it in front of the jar. Any failure = the release as it is, without them.
+LOGMORE = None   # [java flags, class path, main class] once it compiled
+DRAW_JAVA = """if (ev.card() != null && ((from == ZoneType.Library && to == ZoneType.Hand) || (from == ZoneType.Hand && to == ZoneType.Library))) {
+            return new GameLogEntry(GameLogEntryType.INFORMATION, (to == ZoneType.Hand ? "DRAW|" : "BACK|") + ev.card().getOwner() + "|" + ev.card().getName());
+        }
+        """
+DRAW_AT = 'if (from != ZoneType.Battlefield || (to != ZoneType.Graveyard && to != ZoneType.Exile)) {'
+DMG_OLD = 'return new GameLogEntry(GameLogEntryType.DAMAGE, message, ev.source());'
+DMG_NEW = 'return new GameLogEntry(GameLogEntryType.DAMAGE, message + " {by|" + (ev.source() == null ? "|" : ev.source().getController() + "|" + ev.source().getName()) + "|" + ev.amount() + "|" + ev.target() + "}", ev.source());'
+
+def log_more():
+    """Tries the fuller log once; says in the run's log what happened."""
+    global LOGMORE
+    import urllib.request, zipfile
+    try:
+        j = jar()
+        v = re.search(r'forge-gui-desktop-(.+?)-jar-with-dependencies', os.path.basename(j)).group(1)
+        url = 'https://raw.githubusercontent.com/Card-Forge/forge/forge-%s/forge-game/src/main/java/forge/game/GameLogFormatter.java' % v
+        src = urllib.request.urlopen(url, timeout=60).read().decode('utf-8')
+        if src.count(DRAW_AT) != 1: raise RuntimeError('the zone-change code is not as expected')
+        man = zipfile.ZipFile(j).read('META-INF/MANIFEST.MF').decode('utf-8', 'replace').replace('\r', '').replace('\n ', '')
+        main = re.search(r'(?m)^Main-Class: *(\S+)', man).group(1)
+        opens = re.search(r'(?m)^Add-Opens: *(.*)$', man)
+        flags = [x for o in (opens.group(1).split() if opens else []) for x in ('--add-opens', o + '=ALL-UNNAMED')]
+        base = os.path.join(os.getcwd(), 'logmore')
+        for k, with_damage in enumerate((True, False)):
+            text = src.replace(DRAW_AT, DRAW_JAVA + DRAW_AT)
+            if with_damage:
+                if text.count(DMG_OLD) != 1: continue
+                text = text.replace(DMG_OLD, DMG_NEW)
+            d = os.path.join(base, str(k)); os.makedirs(os.path.join(d, 'src'), exist_ok=True)
+            f = os.path.join(d, 'src', 'GameLogFormatter.java'); open(f, 'w', encoding='utf-8').write(text)
+            r = subprocess.run([java_bin('javac'), '-nowarn', '-cp', j, '-d', os.path.join(d, 'classes'), f], capture_output=True, text=True, timeout=300)
+            if r.returncode == 0:
+                LOGMORE = [flags, os.path.join(d, 'classes') + os.pathsep + j, main]
+                print('fuller log: draws%s (Forge %s)' % (' and damage by player' if with_damage else '', v), flush=True); return
+            print('fuller log: did not compile:', r.stderr[-600:], flush=True)
+    except Exception as e:
+        print('fuller log: not available,', repr(e)[:300], flush=True)
+
 def play(work, decks, games, quiet=True, slot=0, limit=None):
-    java = os.path.join(os.environ.get('JAVA_HOME_21_X64') or os.environ.get('JAVA_HOME') or '', 'bin', 'java')
-    if not os.path.exists(java): java = 'java'
-    cmd = ['xvfb-run', '-a', java, '-Xmx2600m', '-Djava.awt.headless=false', '-jar', jar(), 'sim', '-d', *decks,
+    java = java_bin()
+    run = [*LOGMORE[0], '-cp', LOGMORE[1], LOGMORE[2]] if LOGMORE else ['-jar', jar()]
+    cmd = ['xvfb-run', '-a', java, '-Xmx2600m', '-Djava.awt.headless=false', *run, 'sim', '-d', *decks,
            '-D', work + os.sep, '-f', 'commander', '-n', str(games), '-c', str(CLOCK)]
     if PROFILE: cmd += ['-a', *([PROFILE] * len(decks))]
     if quiet: cmd.append('-q')
@@ -151,12 +197,18 @@ DRAW = re.compile(r'Game Result: Game (\d+) ended in a Draw! Took (\d+) ms')
 TURN = re.compile(r'^Turn: Turn (\d+) \(Ai\((\d+)\)-')
 ACT = re.compile(r'^(Land|Add To Stack): Ai\((\d+)\)-.*? (played|cast) (.+?)(?: \(\d+\))?(?: targeting .*)?$')
 LOST = re.compile(r'^Game Outcome: Ai\((\d+)\)-.* has lost')
+# Only with the fuller log (log_more): a card to or from a hand, and damage with the player whose card dealt it.
+MOVE = re.compile(r'^[^:]+: (DRAW|BACK)\|Ai\((\d+)\)-[^|]*\|(.*)$')
+DMG = re.compile(r'\{by\|(?:Ai\((\d+)\)-[^|]*)?\|([^|]*)\|(\d+)\|Ai\((\d+)\)-.*\}$')
+MULL = re.compile(r'^Mulligan: .*Ai\((\d+)\)-')
+TOP = 6   # draws after the opening hand that still count as the top of the shuffled deck
 
 def parse(out, decks, names):
     """One record per game from Forge's full log: winner, turns, and for our deck (seat `me`) what it did."""
     me = decks.index(DECK) + 1 if DECK in decks else 0
     games = []; cur = None
-    def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'first': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'lost_order': [], 'timeout': False}
+    def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'first': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'lost_order': [], 'timeout': False,
+                          'open': [], 'top': [], 'mull': 0, 'dl': False, 'dealt': {}, 'hit': 0, 'hit6': 0}
     cur = fresh()
     for line in out.splitlines():
         m = TURN.match(line)
@@ -171,6 +223,30 @@ def parse(out, decks, names):
             cur['first'].setdefault(card, cur['my_turns'])
             if m.group(1) == 'Land' and cur['my_turns'] <= 6: cur['lands_by_t6'] += 1
             if card == COMMANDER and cur['cmd_turn'] is None: cur['cmd_turn'] = cur['my_turns']
+            continue
+        m = MOVE.match(line)
+        if m:
+            cur['dl'] = True
+            if int(m.group(2)) == me:
+                card = m.group(3).strip()
+                if cur['turns'] == 0:
+                    # Before the first turn: the opening hand, mulligans included (a hand put back leaves it again).
+                    if m.group(1) == 'DRAW': cur['open'].append(card)
+                    elif card in cur['open']: cur['open'].remove(card)
+                elif m.group(1) == 'DRAW' and len(cur['top']) < TOP: cur['top'].append(card)
+            continue
+        m = MULL.match(line)
+        if m:
+            if int(m.group(1)) == me: cur['mull'] += 1
+            continue
+        if line.startswith('Damage:'):
+            m = DMG.search(line)
+            if m:
+                by = int(m.group(1) or 0); to = int(m.group(4)); n = int(m.group(3))
+                if to == me:
+                    cur['hit'] += n
+                    if cur['my_turns'] <= 6: cur['hit6'] += n
+                elif by == me and m.group(2): cur['dealt'][m.group(2)] = cur['dealt'].get(m.group(2), 0) + n
             continue
         m = LOST.match(line)
         if m: cur['lost_order'].append(int(m.group(1))); continue
@@ -207,11 +283,16 @@ def tables(lib):
 def play_stage(work, lib):
     """This machine's tables (every SHARDS-th one), each game's record written to records/<shard>.json."""
     pods = [ds for i, ds in enumerate(tables(lib)) if i % SHARDS == SHARD]
+    if MODE != 'calib' and MODE != 'ladder' and os.environ.get('LOGMORE', '1') != '0': log_more()
     if MODE == 'smoke':
         out, secs = play(work, pods[0], 1, quiet=False)
         lines = out.splitlines()
         print('=== SMOKE: one game with its full log, %d lines, %.0f s ===' % (len(lines), secs))
-        print('\n'.join(lines[:60])); print('...'); print('\n'.join(lines[-120:]))
+        print('\n'.join(lines[:90])); print('...'); print('\n'.join(lines[-120:]))
+        print('=== SMOKE: the first damage and mulligan lines ===')
+        print('\n'.join([l for l in lines if l.startswith(('Damage:', 'Mulligan:'))][:12]))
+        g = parse(out, pods[0], lib)
+        print('=== SMOKE: read from it ===', json.dumps(g)[:3000])
     t0 = time.time(); recs = []; bad = []; skipped = []
     from concurrent.futures import ThreadPoolExecutor
     import queue
@@ -232,6 +313,12 @@ def play_stage(work, lib):
                 return
             out = play(work, ds, GAMES, quiet=False, slot=k, limit=left)[0]
             gs = parse(out, ds, lib)
+            global LOGMORE
+            if LOGMORE and not gs and 'TABLE STOPPED' not in out and re.search(r'Exception|Error', out[-3000:]):
+                print('fuller log: a table failed with it, playing on without:', out[-400:].replace('\n', ' | '), flush=True)
+                LOGMORE = None
+                out = play(work, ds, GAMES, quiet=False, slot=k, limit=left)[0]
+                gs = parse(out, ds, lib)
             with lock:
                 if len(gs) < GAMES: bad.append({'decks': ds, 'games_read': len(gs), 'tail': out[-800:]})
                 for g in gs:
@@ -255,6 +342,28 @@ def card_results(mine, deck_cards):
         rest = [g for g in mine if c not in g['cast'] and g['my_turns'] >= (t or 0)]
         rows.append([c, len(played), sum(g['me_won'] for g in played), t, len(rest), sum(g['me_won'] for g in rest)])
     return rows
+
+def draw_results(mine, deck_cards):
+    """Per card, over the games whose log had the draws: [name, games it was in the opening hand we kept, of which won,
+    games it was among the top cards of the shuffled deck (that hand and the next TOP draws), of which won]. Which
+    cards those are is the shuffle's doing, not the game's, so the difference is the card's own effect."""
+    gs = [g for g in mine if g.get('dl')]
+    rows = []
+    for c in deck_cards:
+        o = [g for g in gs if c in g['open']]; t = [g for g in gs if c in g['open'] or c in g['top']]
+        rows.append([c, len(o), sum(g['me_won'] for g in o), len(t), sum(g['me_won'] for g in t)])
+    return gs, rows
+
+def why(gs):
+    """The games we won beside the ones we did not, on what happened early: for reading what the deck's wins hang on."""
+    def side(xs):
+        if not xs: return None
+        n = len(xs); avg = lambda f: round(sum(f(g) for g in xs) / n, 2)
+        cmd = [g['cmd_turn'] for g in xs if g['cmd_turn'] is not None]
+        return {'games': n, 'mulligans': avg(lambda g: g['mull']), 'lands_by_turn_6': avg(lambda g: g['lands_by_t6']),
+                'commander_cast_pct': round(100 * len(cmd) / n, 1), 'commander_turn': round(sum(cmd) / len(cmd), 2) if cmd else None,
+                'damage_taken_by_turn_6': avg(lambda g: g['hit6']), 'damage_taken': avg(lambda g: g['hit']), 'our_turns': avg(lambda g: g['my_turns'])}
+    return {'won': side([g for g in gs if g['me_won']]), 'not_won': side([g for g in gs if not g['me_won']])}
 
 def places(mine):
     out = [0, 0, 0, 0]
@@ -327,6 +436,19 @@ def merge_stage(work, lib):
             # Per opponent: [name, games at one table with it, of which our deck won, of which it won, games our deck was out before it].
             'vs': versus(mine, lib),
         }
+        gs, rows = draw_results(mine, deck_cards)
+        if len(gs) >= 20:
+            dealt = {}
+            for g in gs:
+                for c, d in g['dealt'].items(): x = dealt.setdefault(c, [c, 0, 0]); x[1] += 1; x[2] += d
+            summary['our_deck'].update({
+                # Games whose log had the draws, and how many of them we won: what `draws` is counted over.
+                'draw_games': len(gs), 'draw_wins': sum(g['me_won'] for g in gs), 'top_cards': 7 + TOP, 'draws': rows,
+                'mulligans_avg': round(sum(g['mull'] for g in gs) / len(gs), 2),
+                # Damage our cards dealt to the other players: [card, games it dealt any, damage in all].
+                'dealt': sorted(dealt.values(), key=lambda x: -x[2])[:25],
+                'why': why(gs),
+            })
     print('=== DECK SIM SUMMARY ==='); print(json.dumps(summary, indent=1)); print('=== END SUMMARY ===')
 
 def main():
