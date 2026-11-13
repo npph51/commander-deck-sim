@@ -430,15 +430,19 @@ def levers(mine):
             out[k][0] += 1; out[k][1 + p] += 1
         return out
     dl = [g for g in mine if g.get('dl')]
+    # Only games in which the deck had the turns the count is over. A game it was knocked out of on its turn 4 has
+    # few lands, no commander and little damage by its turn 6 because it ended, not the other way round: counted in,
+    # such games make "too few lands" look like the reason for a loss that came first.
+    six = lambda gs: [g for g in gs if g['my_turns'] >= 6]
     cmd = lambda g: 2 if g['cmd_turn'] is None or g['cmd_turn'] >= 7 else 0 if g['cmd_turn'] <= 4 else 1
     out = {
-        'lands': {'groups': ['4 or fewer lands by its turn 6', '5 lands', '6 or more'], 'rows': split(mine, lambda g: 0 if g['lands_by_t6'] <= 4 else 1 if g['lands_by_t6'] == 5 else 2, 3)},
-        'commander': {'groups': ['commander by its turn 4', 'on turn 5 or 6', 'later or never'], 'rows': split(mine, cmd, 3)},
-        'early': {'groups': ['no or one spell by its turn 4', '2 or 3 spells', '4 or more'], 'rows': split(mine, lambda g: 0 if g['early'] <= 1 else 1 if g['early'] <= 3 else 2, 3)},
+        'lands': {'groups': ['4 or fewer lands by its turn 6', '5 lands', '6 or more'], 'rows': split(six(mine), lambda g: 0 if g['lands_by_t6'] <= 4 else 1 if g['lands_by_t6'] == 5 else 2, 3)},
+        'commander': {'groups': ['commander by its turn 4', 'on turn 5 or 6', 'later or never'], 'rows': split(six(mine), cmd, 3)},
+        'early': {'groups': ['no or one spell by its turn 4', '2 or 3 spells', '4 or more'], 'rows': split([g for g in mine if g['my_turns'] >= 4], lambda g: 0 if g['early'] <= 1 else 1 if g['early'] <= 3 else 2, 3)},
     }
     if len(dl) >= 20:
         out['mulligan'] = {'groups': ['kept its first hand', 'took a mulligan'], 'rows': split(dl, lambda g: 0 if not g['mull'] else 1, 2)}
-        out['pressure'] = {'groups': ['under 5 damage taken by its turn 6', '5 to 14', '15 or more'], 'rows': split(dl, lambda g: 0 if g['hit6'] < 5 else 1 if g['hit6'] < 15 else 2, 3)}
+        out['pressure'] = {'groups': ['under 5 damage taken by its turn 6', '5 to 14', '15 or more'], 'rows': split(six(dl), lambda g: 0 if g['hit6'] < 5 else 1 if g['hit6'] < 15 else 2, 3)}
     return out
 
 def first_cards(mine):
