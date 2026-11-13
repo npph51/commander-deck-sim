@@ -1,7 +1,7 @@
 """Commander deck test.
 
 Plays four-player Commander games AI against AI with Forge's own `sim` mode (github.com/Card-Forge/forge, GPL; this
-repository only runs Forge's release, none of its code is here) and prints one JSON summary: the deck under test
+repository only runs Forge's release, none of its code is here; see log_more for the one file compiled at run time) and prints one JSON summary: the deck under test
 against three official preconstructed decks (mode test), the precons among themselves (mode calib), or the premium
 precons and players' average decks each against three ordinary precons (mode ladder).
 """
@@ -200,7 +200,7 @@ LOST = re.compile(r'^Game Outcome: Ai\((\d+)\)-.* has lost')
 # Only with the fuller log (log_more): a card to or from a hand, and damage with the player whose card dealt it.
 MOVE = re.compile(r'^[^:]+: (DRAW|BACK)\|Ai\((\d+)\)-[^|]*\|(.*)$')
 DMG = re.compile(r'\{by\|(?:Ai\((\d+)\)-[^|]*)?\|([^|]*)\|(\d+)\|Ai\((\d+)\)-.*\}$')
-MULL = re.compile(r'^Mulligan: .*Ai\((\d+)\)-')
+MULL = re.compile(r'^Mulligan: .*Ai\((\d+)\)-.* mulliganed ')   # not the line for a hand that was kept
 TOP = 6   # draws after the opening hand that still count as the top of the shuffled deck
 
 def parse(out, decks, names):
@@ -242,7 +242,7 @@ def parse(out, decks, names):
         if line.startswith('Damage:'):
             m = DMG.search(line)
             if m:
-                by = int(m.group(1) or 0); to = int(m.group(4)); n = int(m.group(3))
+                by = int(m.group(1) or 0); to = int(m.group(4)); n = min(60, int(m.group(3)))   # one runaway hit says no more than a lethal one
                 if to == me:
                     cur['hit'] += n
                     if cur['my_turns'] <= 6: cur['hit6'] += n

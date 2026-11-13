@@ -11,7 +11,7 @@ preconstructed decks.
   lines) and `classic` (the first twelve).
 - `.github/workflows/sim.yml` runs it on GitHub Actions, by hand only: up to 20 machines play their share of the tables side by side, then one job merges their games into the summary. Forge's release is kept in the Actions cache.
 
-Forge is downloaded as its own release at run time; none of its code is in this repository. Results are computer play:
+Forge is downloaded as its own release at run time; none of its code is in this repository. Forge's game log leaves out which cards a player draws, so a test compiles one file of that release's own source (its log writer, fetched at run time) with draws and the player behind each damage added, and runs the release with it in front; if that fails, the release runs as it is and the summary has no draw figures. Results are computer play:
 they compare decks under the same AI and say nothing certain about a real table.
 
 This repository exists only to run these simulations. It holds no secrets and takes no contributions.
