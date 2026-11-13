@@ -562,6 +562,26 @@ def merge_stage(work, lib):
                 'first': first_cards(mine),
             })
     print('=== DECK SIM SUMMARY ==='); print(json.dumps(summary, indent=1)); print('=== END SUMMARY ===')
+    try: print_games(parts, lib, summary)
+    except Exception as e: print('games not printed: %s' % e)   # never at the summary's cost
+
+def print_games(parts, lib, summary):
+    """Every game as it was read, for whoever started the run to keep: one line of JSON for the run, then one per
+    game (the decks by seat, the winner, who went out in which order, and for the tested deck what it drew, played and
+    took), gzipped and printed as base64 between two markers. Nothing is stored here."""
+    import base64, gzip
+    head = {'v': 1, 'kind': 'run', **{k: summary.get(k) for k in ('mode', 'pool', 'pods', 'games_per_pod', 'clock_s', 'profile', 'workers', 'budget_min', 'skip', 'average', 'games')},
+            'seed': SEED, 'seeded_tables': FSEED, 'swaps': SWAPS, 'top_draws': TOP, 'commander': COMMANDER}
+    lines = [json.dumps(head, separators=(',', ':'))]
+    for g in (g for p in parts for g in p['games']):
+        r = dict(g); r['decks'] = [lib.get(d, d) for d in g.get('decks') or []]
+        r['winner'] = lib.get(g['winner'], g['winner']) if g.get('winner') else None
+        if FSEED and g.get('table') is not None: r['seed'] = table_seed(g['table'])
+        lines.append(json.dumps(r, separators=(',', ':')))
+    blob = base64.b64encode(gzip.compress(('\n'.join(lines) + '\n').encode('utf-8'), 9)).decode('ascii')
+    print('=== GAMES gz64 %d ===' % (len(lines) - 1))
+    for i in range(0, len(blob), 3000): print(blob[i:i + 3000])
+    print('=== END GAMES ===')
 
 def main():
     work, lib = prepare()
