@@ -59,6 +59,10 @@ except Exception: SWAPS = []
 # the same tables, which takes luck out of the comparison. '0' = Forge's own random seed, as before.
 FSEED = os.environ.get('FSEED', '1') != '0'
 def table_seed(i): return 1 + (SEED * 100003 + i * 7919) % 2000000000
+# Every game of a table on a seed of its own (one Forge start per game), so the same game of another run of the deck
+# is dealt the same way: lists are then compared game by game. Game 0 keeps the table's seed, as runs before had it.
+PERGAME = FSEED and os.environ.get('PERGAME', '1') != '0'
+def game_seed(base, g): return base if not g else 1 + (base * 31 + g * 104729) % 2000000000
 AVERAGE = (os.environ.get('AVERAGE') or '').strip()
 EXTRA = [x.strip() for x in (os.environ.get('EXTRA') or '').split('|') if x.strip()]
 AVERAGES_URL = 'https://github.com/Card-Forge/forge-extras/raw/refs/heads/main/decks/edhrec-average.zip'
@@ -357,14 +361,29 @@ def play_stage(work, lib):
             mask = mask_of.get(id(ds), 0); mine = swapped(work, mask)
             seats = [mine if d == DECK else d for d in ds]
             seed = seed_of.get(id(ds))
-            out = play(work, seats, GAMES, quiet=False, slot=k, limit=left, seed=seed)[0]
-            gs = parse(out, seats, lib, mine)
             global LOGMORE
-            if LOGMORE and not gs and 'TABLE STOPPED' not in out and re.search(r'Exception|Error', out[-3000:]):
-                print('fuller log: a table failed with it, playing on without:', out[-400:].replace('\n', ' | '), flush=True)
-                LOGMORE = None
-                out = play(work, seats, GAMES, quiet=False, slot=k, limit=left, seed=seed)[0]
+            def sit(n, sd, limit):
+                global LOGMORE
+                out = play(work, seats, n, quiet=False, slot=k, limit=limit, seed=sd)[0]
                 gs = parse(out, seats, lib, mine)
+                if LOGMORE and not gs and 'TABLE STOPPED' not in out and re.search(r'Exception|Error', out[-3000:]):
+                    print('fuller log: a table failed with it, playing on without:', out[-400:].replace('\n', ' | '), flush=True)
+                    LOGMORE = None
+                    out = play(work, seats, n, quiet=False, slot=k, limit=limit, seed=sd)[0]
+                    gs = parse(out, seats, lib, mine)
+                return out, gs
+            if PERGAME and seed and MODE == 'test':
+                gs = []; out = ''
+                for gi in range(GAMES):
+                    # No new game after the budget either; the one playing gets the grace, as a table did.
+                    if BUDGET and gi and time.time() - t0 > BUDGET * 60: break
+                    left = (BUDGET + GRACE) * 60 - (time.time() - t0) if BUDGET else None
+                    sd = game_seed(seed, gi)
+                    out, g1 = sit(1, sd, left)
+                    for g in g1[:1]: g['game'] = gi; g['seed'] = sd; gs.append(g)
+                    if 'TABLE STOPPED' in out: break
+            else:
+                out, gs = sit(GAMES, seed, left)
             with lock:
                 if len(gs) < GAMES: bad.append({'decks': ds, 'games_read': len(gs), 'tail': out[-800:]})
                 for g in gs:
@@ -456,6 +475,28 @@ def first_cards(mine):
         rows.append([p] + [names.setdefault(c, len(names)) for c in g['open'] + g['top']])
     return {'cards': list(names), 'rows': rows}
 
+def game_rows(mine):
+    """Game by game: [table, game of the table, swaps mask, place]. With every game on its own seed, the same game of
+    another run of this deck was dealt the same way."""
+    rows = []
+    for g in mine:
+        p = place_of(g)
+        if g.get('table') is None or g.get('game') is None or p is None: continue
+        rows.append([g['table'], g['game'], g.get('mask', 0), p])
+    return sorted(rows)
+
+def held_results(mine, deck_cards):
+    """Per card: [name, games it was among the top cards of the shuffled deck and the deck had HELD_TURNS turns or more,
+    of which it was played]. A card the deck held all game and never played is one the computer cannot use, which is
+    not the same as a card it plays and loses with."""
+    gs = [g for g in mine if g.get('dl') and g['my_turns'] >= HELD_TURNS]
+    rows = []
+    for c in deck_cards:
+        h = [g for g in gs if c in g['open'] or c in g['top']]
+        rows.append([c, len(h), sum(1 for g in h if c in g['cast'])])
+    return rows
+HELD_TURNS = 8
+
 def table_rows(mine):
     by = {}
     for g in mine:
@@ -538,6 +579,8 @@ def merge_stage(work, lib):
             # Per table of the deal (its place in it, the swaps it played): [table, mask, games, won, second, third, first out].
             # The same table of another run of this deck started from the same shuffles (seeded).
             'tables': table_rows(mine),
+            # Game by game, when each had its own seed: [table, game, mask, place].
+            'per_game': game_rows(mine) if PERGAME else None,
         }
         if SWAPS and any(g.get('mask') for g in mine):
             # Per combination of swaps played: [mask, games, of which won, second, third, first out].
@@ -560,6 +603,7 @@ def merge_stage(work, lib):
                 'dealt': sorted(dealt.values(), key=lambda x: -x[2])[:25],
                 'why': why(gs),
                 'first': first_cards(mine),
+                'held_turns': HELD_TURNS, 'held': held_results(mine, deck_cards),
             })
     print('=== DECK SIM SUMMARY ==='); print(json.dumps(summary, indent=1)); print('=== END SUMMARY ===')
     try: print_games(parts, lib, summary)
@@ -571,12 +615,12 @@ def print_games(parts, lib, summary):
     took), gzipped and printed as base64 between two markers. Nothing is stored here."""
     import base64, gzip
     head = {'v': 1, 'kind': 'run', **{k: summary.get(k) for k in ('mode', 'pool', 'pods', 'games_per_pod', 'clock_s', 'profile', 'workers', 'budget_min', 'skip', 'average', 'games')},
-            'seed': SEED, 'seeded_tables': FSEED, 'swaps': SWAPS, 'top_draws': TOP, 'commander': COMMANDER}
+            'seed': SEED, 'seeded_tables': FSEED, 'seeded_games': PERGAME, 'swaps': SWAPS, 'top_draws': TOP, 'commander': COMMANDER}
     lines = [json.dumps(head, separators=(',', ':'))]
     for g in (g for p in parts for g in p['games']):
         r = dict(g); r['decks'] = [lib.get(d, d) for d in g.get('decks') or []]
         r['winner'] = lib.get(g['winner'], g['winner']) if g.get('winner') else None
-        if FSEED and g.get('table') is not None: r['seed'] = table_seed(g['table'])
+        if FSEED and g.get('table') is not None and 'seed' not in r: r['seed'] = table_seed(g['table'])
         lines.append(json.dumps(r, separators=(',', ':')))
     blob = base64.b64encode(gzip.compress(('\n'.join(lines) + '\n').encode('utf-8'), 9)).decode('ascii')
     print('=== GAMES gz64 %d ===' % (len(lines) - 1))
