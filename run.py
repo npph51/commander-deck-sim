@@ -319,6 +319,7 @@ def play_stage(work, lib):
     every = tables(lib); ms = masks(len(every)) if SWAPS and MODE == 'test' else [0] * len(every)
     mask_of = {id(ds): m for ds, m in zip(every, ms)}
     seed_of = {id(ds): table_seed(SKIP + i) for i, ds in enumerate(every)} if FSEED else {}
+    index_of = {id(ds): SKIP + i for i, ds in enumerate(every)}
     pods = [ds for i, ds in enumerate(every) if i % SHARDS == SHARD]
     if MODE != 'calib' and MODE != 'ladder' and os.environ.get('LOGMORE', '1') != '0': log_more()
     if MODE == 'smoke':
@@ -369,7 +370,7 @@ def play_stage(work, lib):
                 for g in gs:
                     # Whatever combination it played, the record names our deck the same way.
                     if g['winner'] == mine: g['winner'] = DECK
-                    g['decks'] = ds; g['mask'] = mask; recs.append(g)
+                    g['decks'] = ds; g['mask'] = mask; g['table'] = index_of.get(id(ds)); recs.append(g)
                     print('game', len(recs), [lib.get(d, d) for d in ds], '->', lib.get(g['winner'], g['winner']), 'turn', g['turns'], round(g['ms'] / 1000), 's', 'TIMEOUT' if g['timeout'] else '', flush=True)
                 save()
         finally: slots.put(k)
@@ -439,6 +440,14 @@ def levers(mine):
         out['mulligan'] = {'groups': ['kept its first hand', 'took a mulligan'], 'rows': split(dl, lambda g: 0 if not g['mull'] else 1, 2)}
         out['pressure'] = {'groups': ['under 5 damage taken by its turn 6', '5 to 14', '15 or more'], 'rows': split(dl, lambda g: 0 if g['hit6'] < 5 else 1 if g['hit6'] < 15 else 2, 3)}
     return out
+
+def table_rows(mine):
+    by = {}
+    for g in mine:
+        p = place_of(g)
+        if g.get('table') is None or p is None: continue
+        r = by.setdefault(g['table'], [g['table'], g.get('mask', 0), 0, 0, 0, 0, 0]); r[2] += 1; r[3 + p] += 1
+    return sorted(by.values())
 
 def places(mine):
     out = [0, 0, 0, 0]
@@ -511,6 +520,9 @@ def merge_stage(work, lib):
             # Per opponent: [name, games at one table with it, of which our deck won, of which it won, games our deck was out before it].
             'vs': versus(mine, lib),
             'levers': levers(mine),
+            # Per table of the deal (its place in it, the swaps it played): [table, mask, games, won, second, third, first out].
+            # The same table of another run of this deck started from the same shuffles (seeded).
+            'tables': table_rows(mine),
         }
         if SWAPS and any(g.get('mask') for g in mine):
             # Per combination of swaps played: [mask, games, of which won, second, third, first out].
