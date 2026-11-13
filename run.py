@@ -256,6 +256,28 @@ def card_results(mine, deck_cards):
         rows.append([c, len(played), sum(g['me_won'] for g in played), t, len(rest), sum(g['me_won'] for g in rest)])
     return rows
 
+def places(mine):
+    out = [0, 0, 0, 0]
+    for g in mine:
+        if g['me_won']: out[0] += 1
+        elif g['me'] in g['lost_order']:
+            i = g['lost_order'].index(g['me'])
+            if i < 3: out[3 - i] += 1
+    return out
+
+def versus(mine, lib):
+    rows = {}
+    for g in mine:
+        order = g['lost_order']; mine_at = order.index(g['me']) if g['me'] in order else None
+        for seat, d in enumerate(g['decks'], 1):
+            if d == DECK: continue
+            r = rows.setdefault(d, [lib.get(d, d), 0, 0, 0, 0]); r[1] += 1
+            if g['me_won']: r[2] += 1
+            if g['winner'] == d: r[3] += 1
+            # Out before it: our deck lost and that deck was still in the game then.
+            if mine_at is not None and (seat not in order or order.index(seat) > mine_at): r[4] += 1
+    return sorted(rows.values(), key=lambda r: -r[1])
+
 def merge_stage(work, lib):
     parts = [json.load(open(f)) for f in sorted(glob.glob('records/**/*.json', recursive=True))]
     stats = {}; total = draws = 0; ms = []; mine = []; casts = {}
@@ -299,6 +321,11 @@ def merge_stage(work, lib):
             'least_played': sorted(([c, round(100 * casts.get(c, 0) / n, 1)] for c in deck_cards), key=lambda x: x[1])[:20],
             'most_played': sorted(([c, round(100 * casts.get(c, 0) / n, 1)] for c in deck_cards), key=lambda x: -x[1])[:10],
             'cards': card_results(mine, deck_cards),
+            # Where our deck finished: [won, second, third, first out]; games that ended in a draw are in none.
+            'places': places(mine),
+            'win_turn_median': med([g['turns'] for g in mine if g['me_won']]),
+            # Per opponent: [name, games at one table with it, of which our deck won, of which it won, games our deck was out before it].
+            'vs': versus(mine, lib),
         }
     print('=== DECK SIM SUMMARY ==='); print(json.dumps(summary, indent=1)); print('=== END SUMMARY ===')
 
