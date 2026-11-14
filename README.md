@@ -8,6 +8,7 @@ preconstructed decks.
   tested deck the turn its commander was cast, lands played by turn 6 and how often each card was played.
 - After the summary it prints every game as it was read (the decks by seat, the winner, the order the others went out, and for the tested deck what it drew, played and took), gzipped, for whoever started the run to keep. Nothing is stored here.
 - In a test every game is played on a seed of its own (one start of Forge per game), so the same game of a later run of the deck is dealt the same way and two lists can be compared game by game. `PERGAME=0` goes back to one start per table.
+- Every run also prints the names of the cards Forge's own scripts mark as ones its computer player has no play for (`AI:RemoveDeck:All`), and the summary names the tested deck's own: such a card is a blank in a test.
 - The decklist under test is passed in when a run is started, in Forge's `.dck` format; none is stored here. The
   precons are the lists Forge ships, in pools: `standard` (the ordinary precons of late 2023 to 2026), `strong` (premium
   lines) and `classic` (the first twelve).

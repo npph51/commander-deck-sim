@@ -572,6 +572,10 @@ def merge_stage(work, lib):
                'tables_not_started': sum(p.get('skipped', 0) for p in parts),
                'game_seconds_median': round(ms[len(ms) // 2] / 1000, 1) if ms else None,
                'game_seconds_p90': round(ms[int(len(ms) * .9)] / 1000, 1) if ms else None, 'decks': rows, 'groups': groups if MODE == 'ladder' else None, 'average': AVERAGE or None, 'incomplete_pods': bad[:5]}
+    # The cards Forge's computer has no play for: the whole list for the starter, and the tested deck's own in the summary.
+    try: blank = ai_cannot()
+    except Exception as e: blank = []; print('cards without computer play not read: %s' % e)
+    summary['forge'] = forge_version()
     if mine:
         n = len(mine); med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
         deck_cards = [re.sub(r'^\d+ ', '', l).split('|')[0].strip() for l in open(os.path.join(work, DECK), encoding='utf-8').read().split('[Main]')[-1].splitlines() if re.match(r'^1 ', l)]
@@ -593,6 +597,7 @@ def merge_stage(work, lib):
             'vs': versus(mine, lib),
             'levers': levers(mine),
             'field': field_rows(mine, lib),
+            'ai_cannot': sorted(set(blank) & set(deck_names(work))),
             # Per table of the deal (its place in it, the swaps it played): [table, mask, games, won, second, third, first out].
             # The same table of another run of this deck started from the same shuffles (seeded).
             'tables': table_rows(mine),
@@ -623,8 +628,51 @@ def merge_stage(work, lib):
                 'held_turns': HELD_TURNS, 'held': held_results(mine, deck_cards),
             })
     print('=== DECK SIM SUMMARY ==='); print(json.dumps(summary, indent=1)); print('=== END SUMMARY ===')
+    try: print_ai_cannot(blank)
+    except Exception as e: print('list of cards without computer play not printed: %s' % e)
     try: print_games(parts, lib, summary)
     except Exception as e: print('games not printed: %s' % e)   # never at the summary's cost
+
+def deck_names(work):
+    """Every card name in the tested deck's file, the commander included."""
+    out = []
+    for l in open(os.path.join(work, DECK), encoding='utf-8').read().splitlines():
+        m = re.match(r'^\d+ (.+?)(\|.*)?$', l.strip())
+        if m: out.append(m.group(1).strip())
+    return out
+
+def forge_version():
+    m = re.search(r'forge-gui-desktop-(.+?)-jar-with-dependencies', os.path.basename(jar()))
+    return m.group(1) if m else ''
+
+def ai_cannot():
+    """Every card Forge's own script marks as one its computer player has no play for (the line AI:RemoveDeck:All),
+    by the name a deck file gives it: a split card by both halves, any other by its first name. Such a card is a
+    blank in a test, whoever holds it, so whoever starts the runs wants the list before building a deck."""
+    import zipfile
+    names = set()
+    def scan(text):
+        if not re.search(r'^AI:RemoveDeck:All\s*$', text, re.M): return
+        ns = [n.strip() for n in re.findall(r'^Name:(.+)$', text, re.M)]
+        if not ns: return
+        names.add(' // '.join(ns[:2]) if re.search(r'^AlternateMode:\s*Split\s*$', text, re.M) and len(ns) > 1 else ns[0])
+    z = os.path.join(FORGE, 'res', 'cardsfolder', 'cardsfolder.zip')
+    if os.path.exists(z):
+        with zipfile.ZipFile(z) as f:
+            for n in f.namelist():
+                if n.endswith('.txt'): scan(f.read(n).decode('utf-8', 'replace'))
+    else:
+        for q in glob.glob(os.path.join(FORGE, 'res', 'cardsfolder', '**', '*.txt'), recursive=True):
+            scan(open(q, encoding='utf-8', errors='replace').read())
+    return sorted(names)
+
+def print_ai_cannot(names):
+    """The whole list, for the starter to keep: gzipped JSON {forge, names} as base64 between two markers."""
+    import base64, gzip
+    b64 = base64.b64encode(gzip.compress(json.dumps({'forge': forge_version(), 'names': names}, ensure_ascii=False).encode('utf-8'), 9)).decode('ascii')
+    print('=== AI CANNOT gz64 %d ===' % len(names))
+    for i in range(0, len(b64), 3000): print(b64[i:i + 3000])
+    print('=== END AI CANNOT ===', flush=True)
 
 def print_games(parts, lib, summary):
     """Every game as it was read, for whoever started the run to keep: one line of JSON for the run, then one per
