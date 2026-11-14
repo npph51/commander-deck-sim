@@ -24,6 +24,7 @@ WORKERS = max(1, min(8, int(os.environ.get('WORKERS') or 1)))   # tables played 
 BUDGET = max(0, int(os.environ.get('BUDGET') or 0)); GRACE = 10
 SKIP = max(0, min(2000, int(os.environ.get('SKIP') or 0)))   # tables of the seeded deal to pass over: a second part plays the next ones
 PROFILE = os.environ.get('PROFILE', '')          # Forge AI profile for every seat ('' = its default)
+MC = os.environ.get('MC', '')                    # Forge's Flat Monte Carlo layer: on, max or off ('' = Forge's default in simulations, off)
 # The benchmarks, as Forge ships the lists. "standard": the ordinary Wizards precons of late 2023 to 2026 (no premium
 # lines). "strong": the premium lines, built above an ordinary precon, for decks meant to play above that level.
 # "classic": the first twelve, kept so an old result can be played again. "all" (calib only): standard and strong together.
@@ -187,6 +188,7 @@ def play(work, decks, games, quiet=True, slot=0, limit=None, seed=None):
            '-D', work + os.sep, '-f', 'commander', '-n', str(games), '-c', str(CLOCK)]
     if seed: cmd += ['-s', str(seed)]
     if PROFILE: cmd += ['-a', *([PROFILE] * len(decks))]
+    if MC in ('on', 'max', 'off'): cmd += ['-mc', MC]
     if quiet: cmd.append('-q')
     t = time.time()
     # Tables side by side each get a home of their own, so two JVMs never write the same preference or cache files.
@@ -566,7 +568,7 @@ def merge_stage(work, lib):
         for r in rows:
             g = groups.setdefault(r['group'], {'decks': 0, 'games': 0, 'wins': 0}); g['decks'] += 1; g['games'] += r['games']; g['wins'] += r['wins']
         for g in groups.values(): g['win_pct'] = round(100 * g['wins'] / max(1, g['games']), 1); g['ci95'] = wilson(g['wins'], g['games'])
-    summary = {'mode': MODE, 'pool': POOL, 'deck': DECK, 'pods': PODS, 'games_per_pod': GAMES, 'clock_s': CLOCK, 'profile': PROFILE or 'default',
+    summary = {'mode': MODE, 'pool': POOL, 'deck': DECK, 'pods': PODS, 'games_per_pod': GAMES, 'clock_s': CLOCK, 'profile': PROFILE or 'default', 'mc': MC or 'off',
                'machines': len(parts), 'machines_expected': SHARDS, 'workers': WORKERS, 'games': total, 'games_expected': PODS * GAMES, 'draws_or_timeouts': draws,
                'machine_minutes': [p['minutes'] for p in parts], 'budget_min': BUDGET, 'skip': SKIP,
                'tables_not_started': sum(p.get('skipped', 0) for p in parts),

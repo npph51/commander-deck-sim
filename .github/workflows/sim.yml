@@ -27,6 +27,11 @@ on:
         type: choice
         options: ['', Default, Cautious, Reckless, Experimental, Hard, Hardest]
         default: ''
+      mc:
+        description: "Forge's Flat Monte Carlo layer for every seat (blank = off, as Forge has it in simulations)"
+        type: choice
+        options: ['', 'on', 'max', 'off']
+        default: ''
       machines:
         description: 'Machines playing side by side (at most 20); the tables are shared out among them'
         default: '20'
@@ -66,6 +71,7 @@ env:
   GAMES: ${{ inputs.games }}
   CLOCK: ${{ inputs.clock }}
   PROFILE: ${{ inputs.profile }}
+  MC: ${{ inputs.mc }}
   SEED: ${{ inputs.seed }}
   WORKERS: ${{ inputs.workers }}
   POOL: ${{ inputs.pool }}
