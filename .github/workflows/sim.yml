@@ -39,7 +39,7 @@ on:
         description: 'Seed for which precons sit at which table'
         default: '1'
       pool:
-        description: 'Which official decks sit at the tables: classic (the first twelve), standard, strong, all (calib only)'
+        description: 'Which official decks sit at the tables: classic (the first twelve), standard, bracket2 (standard without the decks above Bracket 2), strong, all (calib only)'
         default: 'classic'
       workers:
         description: 'Tables played side by side on each machine (1 to 4: a machine has four cores)'

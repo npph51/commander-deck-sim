@@ -42,6 +42,15 @@ POOLS['standard'] = POOLS['classic'] + [
     'EOC - Counter Intelligence', 'EOC - World Shaper',
     'ECC - Blight Curse', 'ECC - Dance of the Elements',
     'SOC - Lorehold Spirit', 'SOC - Prismari Artistry', 'SOC - Quandrix Unlimited', 'SOC - Silverquill Influence', 'SOC - Witherbloom Pestilence']
+# "bracket2": the standard pool without the decks that are above Commander Bracket 2 by Wizards' own requirements as
+# the lists stand (a Game Changer, mass land denial, a turn-chaining card, or a two-card game-deciding combo under eight
+# mana as Commander Spellbook lists it), so a deck built for Bracket 2 only meets Bracket 2 decks.
+ABOVE_BRACKET_2 = ['BLC - Family Matters',     # Combat Celebrant + Helm of the Host
+                   'LCC - Ahoy Mateys',        # Timestream Navigator
+                   'DRC - Living Energy',      # Lightning Runner + Aetherwind Basker
+                   'TDC - Abzan Armor',        # Seedborn Muse
+                   'EOC - World Shaper']       # Planetary Annihilation
+POOLS['bracket2'] = [d for d in POOLS['standard'] if d not in ABOVE_BRACKET_2]
 POOLS['all'] = POOLS['standard'] + POOLS['strong']
 POOL = os.environ.get('POOL') or 'classic'
 if POOL not in POOLS: POOL = 'classic'
