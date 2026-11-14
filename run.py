@@ -649,12 +649,15 @@ def forge_version():
 
 def ai_cannot():
     """Every card Forge's own script marks as one its computer player has no play for (the line AI:RemoveDeck:All),
-    by the name a deck file gives it: a split card by both halves, any other by its first name. Such a card is a
+    by the name a deck file gives it: a split card by both halves, any other by its first name. Counterspells are
+    left out, as the computer does play those (measured: Swan Song in 11 of 24 games). Such a card is a
     blank in a test, whoever holds it, so whoever starts the runs wants the list before building a deck."""
     import zipfile
     names = set()
     def scan(text):
         if not re.search(r'^AI:RemoveDeck:All\s*$', text, re.M): return
+        # A counterspell is the exception: Forge picks its answers to a spell on the stack before it drops the marked cards.
+        if re.search(r'^A:(?:SP|AB)\$ Counter\b', text, re.M): return
         ns = [n.strip() for n in re.findall(r'^Name:(.+)$', text, re.M)]
         if not ns: return
         names.add(' // '.join(ns[:2]) if re.search(r'^AlternateMode:\s*Split\s*$', text, re.M) and len(ns) > 1 else ns[0])
