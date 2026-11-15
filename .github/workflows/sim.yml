@@ -71,6 +71,9 @@ on:
       teach:
         description: 'on = also write those combos into Forge''s own list of combos (ai-combos.txt)'
         default: ''
+      pergame:
+        description: 'test: 1 = every game its own Forge start and seed (the default), 0 = one Forge start per table'
+        default: '1'
 permissions:
   contents: read
 env:
@@ -92,6 +95,7 @@ env:
   MC_SEATS: ${{ inputs.mc_seats }}
   COMBOS: ${{ inputs.combos }}
   TEACH: ${{ inputs.teach }}
+  PERGAME: ${{ inputs.pergame }}
 jobs:
   # Fetches Forge's release once (kept in the cache per release) and says how many machines play.
   setup:
