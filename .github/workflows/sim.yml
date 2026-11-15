@@ -54,7 +54,7 @@ on:
         description: 'test: a commander name; that commander''s average player deck (as Forge offers it for download) is tested in place of a list'
         default: ''
       extra:
-        description: 'ladder: commanders whose average decks sit down beside the premium precons, names separated by |'
+        description: 'ladder: commanders whose average decks sit down as subjects, names separated by | (pool bracket2: against the 23 decks within Bracket 2, beside the five left out of it; else against the 28 standard decks, beside the premium precons)'
         default: ''
       swaps:
         description: 'test: card swaps to try side by side, as JSON [[card out, card in], ...] (a group made as one: [[out, in], [out, in]]); each table plays a random half of them'

@@ -54,7 +54,11 @@ POOLS['bracket2'] = [d for d in POOLS['standard'] if d not in ABOVE_BRACKET_2]
 POOLS['all'] = POOLS['standard'] + POOLS['strong']
 POOL = os.environ.get('POOL') or 'classic'
 if POOL not in POOLS: POOL = 'classic'
-PRECONS = POOLS['all'] if os.environ.get('MODE') == 'ladder' else POOLS[POOL]
+# ladder: the field the subjects sit down against. Pool bracket2 = the 23 decks within Bracket 2, with the five left out
+# of it as subjects beside the average decks (the premium lines stay out: they were measured on 12 November and set no
+# band); any other pool = the 28 standard decks, with the premium lines as subjects, as the first ladder had it.
+FIELD = POOLS['bracket2'] if POOL == 'bracket2' else POOLS['standard']
+PRECONS = (POOLS['standard'] if POOL == 'bracket2' else POOLS['all']) if os.environ.get('MODE') == 'ladder' else POOLS[POOL]
 
 # Player-built lists as Forge offers them for download: one "average" deck per commander (what players most often run
 # with it). AVERAGE (mode test): that commander's average deck is the deck under test, in place of a list passed in.
@@ -324,8 +328,9 @@ def swapped(work, mask):
 def tables(lib):
     rnd = random.Random(SEED)
     pods = []
-    # ladder: every premium precon and every average deck in turn against three ordinary precons, as a deck under test sits.
-    field = sorted(d for d, n in lib.items() if n in POOLS['standard'])
+    # ladder: every subject (average decks, and the premium or left-out precons) in turn against three decks of the
+    # field, as a deck under test sits.
+    field = sorted(d for d, n in lib.items() if n in FIELD)
     subjects = sorted(d for d in lib if d not in field)
     for i in range(SKIP + PODS):
         if MODE == 'ladder': ds = [subjects[i % len(subjects)]] + rnd.sample(field, 3)
@@ -578,7 +583,8 @@ def merge_stage(work, lib):
     ms.sort()
     if MODE == 'ladder':
         # Per group: the subjects' share of their own tables' games (an even deck wins a quarter).
-        for r in rows: r['group'] = 'average' if r['deck'].startswith('AVG - ') else 'strong' if r['deck'] in POOLS['strong'] else 'standard'
+        for r in rows: r['group'] = ('average' if r['deck'].startswith('AVG - ') else 'strong' if r['deck'] in POOLS['strong']
+                                     else 'field' if r['deck'] in FIELD else 'left_out')
         groups = {}
         for r in rows:
             g = groups.setdefault(r['group'], {'decks': 0, 'games': 0, 'wins': 0}); g['decks'] += 1; g['games'] += r['games']; g['wins'] += r['wins']
