@@ -72,7 +72,7 @@ on:
         description: 'on = also write those combos into Forge''s own list of combos (ai-combos.txt)'
         default: ''
       pergame:
-        description: 'test: 1 = every game its own Forge start and seed (the default), 0 = one Forge start per table'
+        description: 'test: 1 = every game its own Forge start and seed (the default), 2 = one Forge start per table with every game on its own seed, 0 = one Forge start per table'
         default: '1'
       opts:
         description: 'Timing switches, comma-separated: lazy (card scripts read when needed), serialgc, c1. Empty = none'

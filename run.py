@@ -354,7 +354,7 @@ def parse(out, decks, names, mine=DECK):
                           # How each player went out: [seat, how (ENDS), the seat that put it out (0 = not known), card].
                           'outs': [], 'alt': None,
                           # Working state for `outs`, dropped when the game is done.
-                          '_pend': {}, '_zero': {}, '_cb': {}, '_inf': {}, '_actor': 0, '_by_card': {}}
+                          '_pend': {}, '_zero': {}, '_cb': {}, '_inf': {}, '_actor': 0, '_by_card': {}, '_life': {}}
     def done(g):
         # Who won by an alternative win put the others out.
         if g.get('winner_seat'):
@@ -456,6 +456,7 @@ def parse(out, decks, names, mine=DECK):
             m = LIFE.match(line)
             if m:
                 s, old, new = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                cur['_life'][s] = new
                 if new < old:
                     hits = cur['_pend'].pop(s, [])
                     if old > 0 >= new:
@@ -475,7 +476,15 @@ def parse(out, decks, names, mine=DECK):
         m = RES.search(line)
         if m:
             w = re.match(r'Ai\((\d+)\)-', m.group(3))
-            cur.update(ms=int(m.group(2)), winner=decks[int(w.group(1)) - 1] if w else m.group(3), me_won=bool(w and int(w.group(1)) == me), winner_seat=int(w.group(1)) if w else 0)
+            if cur['timeout']:
+                # A game stopped at the clock has no winner: Forge gives every player still in a win (Player.onGameOver)
+                # and its result line names the first of them, usually the lowest seat. A draw, then; the life totals at
+                # the stop are kept (seats still in, 40 when a seat's life never changed), to see later whether the
+                # life leader would be a fair tiebreak.
+                cur['life_at_stop'] = {str(k): cur['_life'].get(k, 40) for k in range(1, len(decks) + 1) if k not in cur['lost_order']}
+                cur.update(ms=int(m.group(2)), winner=None, me_won=False, winner_seat=0)
+            else:
+                cur.update(ms=int(m.group(2)), winner=decks[int(w.group(1)) - 1] if w else m.group(3), me_won=bool(w and int(w.group(1)) == me), winner_seat=int(w.group(1)) if w else 0)
             done(cur); cur = fresh(); continue
         m = DRAW.search(line)
         if m: cur.update(ms=int(m.group(2)), winner=None, me_won=False); done(cur); cur = fresh()
@@ -558,7 +567,7 @@ def play_stage(work, lib):
     def save():
         # After every table, so a machine that is cut off still hands in what it played.
         tmp = 'records/%d.json.tmp' % SHARD
-        json.dump({'shard': SHARD, 'minutes': round((time.time() - t0) / 60, 1), 'games': recs, 'bad': bad, 'skipped': len(skipped)}, open(tmp, 'w'))
+        json.dump({'shard': SHARD, 'minutes': round((time.time() - t0) / 60, 1), 'games': recs, 'bad': bad, 'skipped': len(skipped), 'one_forge': ONEJVM_OK}, open(tmp, 'w'))
         os.replace(tmp, 'records/%d.json' % SHARD)
     def one(ds):
         k = slots.get()
@@ -807,6 +816,9 @@ def merge_stage(work, lib):
                'machines': len(parts), 'machines_expected': SHARDS, 'workers': WORKERS, 'games': total, 'games_expected': PODS * GAMES, 'draws_or_timeouts': draws,
                'machine_minutes': [p['minutes'] for p in parts], 'budget_min': BUDGET, 'skip': SKIP,
                'tables_not_started': sum(p.get('skipped', 0) for p in parts),
+               # Games stopped at the clock (draws), and whether every machine played a table in one start of Forge.
+               'timeouts': sum(1 for p in parts for g in p['games'] if g.get('timeout')),
+               'one_forge': bool(parts) and all(p.get('one_forge') for p in parts),
                'game_seconds_median': round(ms[len(ms) // 2] / 1000, 1) if ms else None,
                'game_seconds_p90': round(ms[int(len(ms) * .9)] / 1000, 1) if ms else None, 'decks': rows, 'groups': groups if MODE == 'ladder' else None, 'average': AVERAGE or None, 'incomplete_pods': bad[:5]}
     # The cards Forge's computer has no play for: the whole list for the starter, and the tested deck's own in the summary.
