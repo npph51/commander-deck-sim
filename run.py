@@ -200,7 +200,7 @@ DRAW_AT = 'if (from != ZoneType.Battlefield || (to != ZoneType.Graveyard && to !
 WATCH_JAVA = """if (ev.card() != null && (from == ZoneType.Battlefield) != (to == ZoneType.Battlefield)) {
             String w = System.getProperty("cs.watch", "");
             if (!w.isEmpty() && ("|" + w + "|").contains("|" + ev.card().getName() + "|")) {
-                return new GameLogEntry(GameLogEntryType.INFORMATION, (to == ZoneType.Battlefield ? "ENTER|" : "LEAVE|") + ev.card().getOwner() + "|" + ev.card().getName());
+                return new GameLogEntry(GameLogEntryType.INFORMATION, (to == ZoneType.Battlefield ? "ENTER|" : "LEAVE|") + ev.card().getOwner() + "|" + ev.card().getId() + "|" + ev.card().getName());
             }
         }
         """
@@ -276,7 +276,7 @@ ACT = re.compile(r'^(Land|Add To Stack): Ai\((\d+)\)-.*? (played|cast) (.+?)(?: 
 LOST = re.compile(r'^Game Outcome: Ai\((\d+)\)-.* has lost')
 # Only with the fuller log (log_more): a card to or from a hand, and damage with the player whose card dealt it.
 MOVE = re.compile(r'^[^:]+: (DRAW|BACK)\|Ai\((\d+)\)-[^|]*\|(.*)$')
-ZONE = re.compile(r'^[^:]+: (ENTER|LEAVE)\|Ai\((\d+)\)-[^|]*\|(.*)$')
+ZONE = re.compile(r'^[^:]+: (ENTER|LEAVE)\|Ai\((\d+)\)-[^|]*\|(?:(-?\d+)\|)?(.*)$')
 DMG = re.compile(r'\{by\|(?:Ai\((\d+)\)-[^|]*)?\|([^|]*)\|(\d+)\|Ai\((\d+)\)-.*\}$')
 MULL = re.compile(r'^Mulligan: .*Ai\((\d+)\)-.* mulliganed ')   # not the line for a hand that was kept
 TOP = 6   # draws after the opening hand that still count as the top of the shuffled deck
@@ -287,7 +287,7 @@ def parse(out, decks, names, mine=DECK):
     games = []; cur = None
     def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'first': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'early': 0, 'lost_order': [], 'timeout': False,
                           'open': [], 'top': [], 'mull': 0, 'dl': False, 'dealt': {}, 'hit': 0, 'hit6': 0,
-                          'bf': {}, 'seen': [ckey(COMMANDER)] if COMMANDER and ckey(COMMANDER) in WATCH else [], 'whole': {}}
+                          'bf': {}, 'on': {}, 'seen': [ckey(COMMANDER)] if COMMANDER and ckey(COMMANDER) in WATCH else [], 'whole': {}}
     cur = fresh()
     def check(cast=None):
         # Every piece on the battlefield, or (a spell piece) cast just now while the others are there.
@@ -302,9 +302,14 @@ def parse(out, decks, names, mine=DECK):
         m = ZONE.match(line)
         if m:
             if int(m.group(2)) == me:
-                k = ckey(m.group(3).strip())
-                cur['bf'][k] = max(0, cur['bf'].get(k, 0) + (1 if m.group(1) == 'ENTER' else -1))
-                if m.group(1) == 'ENTER': saw(m.group(3)); check()
+                # By the card's own id, so a copy that left without its arrival in the log takes nothing away.
+                k = ckey(m.group(4).strip()); ids = cur['on'].setdefault(k, [])
+                cid = m.group(3) or m.group(4)
+                if m.group(1) == 'ENTER':
+                    if cid not in ids: ids.append(cid)
+                elif cid in ids: ids.remove(cid)
+                cur['bf'][k] = len(ids)
+                if m.group(1) == 'ENTER': saw(m.group(4)); check()
             continue
         m = TURN.match(line)
         if m:
