@@ -25,6 +25,18 @@ BUDGET = max(0, int(os.environ.get('BUDGET') or 0)); GRACE = 10
 SKIP = max(0, min(2000, int(os.environ.get('SKIP') or 0)))   # tables of the seeded deal to pass over: a second part plays the next ones
 PROFILE = os.environ.get('PROFILE', '')          # Forge AI profile for every seat ('' = its default)
 MC = os.environ.get('MC', '')                    # Forge's Flat Monte Carlo layer: on, max or off ('' = Forge's default in simulations, off)
+# Whose seat gets Monte Carlo when it is on: every seat (all) or only the deck under test (ours: the other three play on a
+# copy of Forge's default profile with FLAT_MC_ENABLED=false, written into the release's res/ai at the start).
+MC_SEATS = (os.environ.get('MC_SEATS') or 'all').strip().lower()
+# Combos to follow in the deck under test, as JSON [[card, card, ...], ...]: when every piece is on the battlefield at once
+# (a spell piece: cast while the others are there), and whether the game was won then. TEACH=on also writes them into
+# Forge's own list of combos (res/lists/ai-combos.txt), which its Monte Carlo layer puts together on purpose.
+try: COMBOS = [[str(c).strip() for c in x if str(c).strip()] for x in json.loads(os.environ.get('COMBOS') or '[]') if isinstance(x, list)][:12]
+except Exception: COMBOS = []
+COMBOS = [c for c in COMBOS if len(c) >= 2]
+TEACH = (os.environ.get('TEACH') or '').strip().lower() in ('on', 'true', '1', 'yes')
+def ckey(n): return re.sub(r'[^a-z0-9]+', '', n.split(' // ')[0].lower())
+WATCH = {ckey(c): c.split(' // ')[0] for combo in COMBOS for c in combo}
 # The benchmarks, as Forge ships the lists. "standard": the ordinary Wizards precons of late 2023 to 2026 (no premium
 # lines). "strong": the premium lines, built above an ordinary precon, for decks meant to play above that level.
 # "classic": the first twelve, kept so an old result can be played again. "all" (calib only): standard and strong together.
@@ -142,11 +154,29 @@ def prepare():
         if len(text) > 20000 or not re.search(r'(?i)\[main\]', text): sys.exit('no usable decklist was passed in')
         open(os.path.join(work, DECK), 'w', encoding='utf-8').write(text)
     global COMMANDER
+    setup_forge()
     mine = os.path.join(work, os.path.basename(DECK))
     if not os.path.exists(mine): return work, lib
     m = re.search(r'(?is)\[commander\]\s*\n1 ([^|\n]+)', open(mine, encoding='utf-8').read())
     COMMANDER = m.group(1).strip().rstrip('+') if m else None
     return work, lib
+
+def setup_forge():
+    """The switches that live in the release's own files: a profile without Monte Carlo for the other seats, and the
+    combos taught to Forge. Written once per machine, before any table."""
+    if MC in ('on', 'max') and MC_SEATS == 'ours':
+        src = os.path.join(FORGE, 'res', 'ai', 'Default.ai')
+        text = open(src, encoding='utf-8').read() if os.path.exists(src) else ''
+        text = re.sub(r'(?m)^FLAT_MC_ENABLED=.*$', 'FLAT_MC_ENABLED=false', text)
+        if 'FLAT_MC_ENABLED=false' not in text: text += '\nFLAT_MC_ENABLED=false\n'
+        open(os.path.join(FORGE, 'res', 'ai', 'NoMC.ai'), 'w', encoding='utf-8').write(text)
+        print('Monte Carlo for the deck under test only (the other seats: NoMC.ai)', flush=True)
+    if TEACH and COMBOS:
+        f = os.path.join(FORGE, 'res', 'lists', 'ai-combos.txt')
+        if not os.path.exists(f): print('no ai-combos.txt in this release: nothing taught', flush=True); return
+        lines = ['win | Taught %d: %s | %s' % (i + 1, ' + '.join(c.split(' // ')[0] for c in combo), ' | '.join(c.split(' // ')[0] for c in combo)) for i, combo in enumerate(COMBOS)]
+        with open(f, 'a', encoding='utf-8') as fh: fh.write('\n' + '\n'.join(lines) + '\n')
+        print('taught to Forge:', *lines, sep='\n  ', flush=True)
 
 def jar():
     js = glob.glob(os.path.join(FORGE, 'forge-gui-desktop-*-jar-with-dependencies.jar'))
@@ -166,6 +196,14 @@ DRAW_JAVA = """if (ev.card() != null && ((from == ZoneType.Library && to == Zone
         }
         """
 DRAW_AT = 'if (from != ZoneType.Battlefield || (to != ZoneType.Graveyard && to != ZoneType.Exile)) {'
+# Only for the cards named in -Dcs.watch (a combo's pieces): when one comes onto or leaves the battlefield.
+WATCH_JAVA = """if (ev.card() != null && (from == ZoneType.Battlefield) != (to == ZoneType.Battlefield)) {
+            String w = System.getProperty("cs.watch", "");
+            if (!w.isEmpty() && ("|" + w + "|").contains("|" + ev.card().getName() + "|")) {
+                return new GameLogEntry(GameLogEntryType.INFORMATION, (to == ZoneType.Battlefield ? "ENTER|" : "LEAVE|") + ev.card().getOwner() + "|" + ev.card().getName());
+            }
+        }
+        """
 DMG_OLD = 'return new GameLogEntry(GameLogEntryType.DAMAGE, message, ev.source());'
 DMG_NEW = 'return new GameLogEntry(GameLogEntryType.DAMAGE, message + " {by|" + (ev.source() == null ? "|" : ev.source().getController() + "|" + ev.source().getName()) + "|" + ev.amount() + "|" + ev.target() + "}", ev.source());'
 
@@ -184,8 +222,8 @@ def log_more():
         opens = re.search(r'(?m)^Add-Opens: *(.*)$', man)
         flags = [x for o in (opens.group(1).split() if opens else []) for x in ('--add-opens', o + '=ALL-UNNAMED')]
         base = os.path.join(os.getcwd(), 'logmore')
-        for k, with_damage in enumerate((True, False)):
-            text = src.replace(DRAW_AT, DRAW_JAVA + DRAW_AT)
+        for k, (with_watch, with_damage) in enumerate(((True, True), (False, True), (False, False))):
+            text = src.replace(DRAW_AT, (WATCH_JAVA if with_watch else '') + DRAW_JAVA + DRAW_AT)
             if with_damage:
                 if text.count(DMG_OLD) != 1: continue
                 text = text.replace(DMG_OLD, DMG_NEW)
@@ -194,7 +232,7 @@ def log_more():
             r = subprocess.run([java_bin('javac'), '-nowarn', '-cp', j, '-d', os.path.join(d, 'classes'), f], capture_output=True, text=True, timeout=300)
             if r.returncode == 0:
                 LOGMORE = [flags, os.path.join(d, 'classes') + os.pathsep + j, main]
-                print('fuller log: draws%s (Forge %s)' % (' and damage by player' if with_damage else '', v), flush=True); return
+                print('fuller log: draws%s%s (Forge %s)' % (' and damage by player' if with_damage else '', ', combo pieces on the battlefield' if with_watch else '', v), flush=True); return
             print('fuller log: did not compile:', r.stderr[-600:], flush=True)
     except Exception as e:
         print('fuller log: not available,', repr(e)[:300], flush=True)
@@ -205,8 +243,12 @@ def play(work, decks, games, quiet=True, slot=0, limit=None, seed=None):
     cmd = ['xvfb-run', '-a', java, '-Xmx2600m', '-Djava.awt.headless=false', *run, 'sim', '-d', *decks,
            '-D', work + os.sep, '-f', 'commander', '-n', str(games), '-c', str(CLOCK)]
     if seed: cmd += ['-s', str(seed)]
-    if PROFILE: cmd += ['-a', *([PROFILE] * len(decks))]
+    if MC in ('on', 'max') and MC_SEATS == 'ours':
+        mineAt = [d == DECK or d.startswith('deck_m') for d in decks]
+        cmd += ['-a', *[(PROFILE or 'Default') if m else 'NoMC' for m in mineAt]]
+    elif PROFILE: cmd += ['-a', *([PROFILE] * len(decks))]
     if MC in ('on', 'max', 'off'): cmd += ['-mc', MC]
+    if WATCH: cmd = cmd[:3] + ['-Dcs.watch=' + '|'.join(sorted(set(WATCH.values())))] + cmd[3:]
     if quiet: cmd.append('-q')
     t = time.time()
     # Tables side by side each get a home of their own, so two JVMs never write the same preference or cache files.
@@ -234,6 +276,7 @@ ACT = re.compile(r'^(Land|Add To Stack): Ai\((\d+)\)-.*? (played|cast) (.+?)(?: 
 LOST = re.compile(r'^Game Outcome: Ai\((\d+)\)-.* has lost')
 # Only with the fuller log (log_more): a card to or from a hand, and damage with the player whose card dealt it.
 MOVE = re.compile(r'^[^:]+: (DRAW|BACK)\|Ai\((\d+)\)-[^|]*\|(.*)$')
+ZONE = re.compile(r'^[^:]+: (ENTER|LEAVE)\|Ai\((\d+)\)-[^|]*\|(.*)$')
 DMG = re.compile(r'\{by\|(?:Ai\((\d+)\)-[^|]*)?\|([^|]*)\|(\d+)\|Ai\((\d+)\)-.*\}$')
 MULL = re.compile(r'^Mulligan: .*Ai\((\d+)\)-.* mulliganed ')   # not the line for a hand that was kept
 TOP = 6   # draws after the opening hand that still count as the top of the shuffled deck
@@ -243,9 +286,26 @@ def parse(out, decks, names, mine=DECK):
     me = decks.index(mine) + 1 if mine in decks else 0
     games = []; cur = None
     def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'first': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'early': 0, 'lost_order': [], 'timeout': False,
-                          'open': [], 'top': [], 'mull': 0, 'dl': False, 'dealt': {}, 'hit': 0, 'hit6': 0}
+                          'open': [], 'top': [], 'mull': 0, 'dl': False, 'dealt': {}, 'hit': 0, 'hit6': 0,
+                          'bf': {}, 'seen': [ckey(COMMANDER)] if COMMANDER and ckey(COMMANDER) in WATCH else [], 'whole': {}}
     cur = fresh()
+    def check(cast=None):
+        # Every piece on the battlefield, or (a spell piece) cast just now while the others are there.
+        for i, combo in enumerate(COMBOS):
+            if str(i) in cur['whole']: continue
+            if all(cur['bf'].get(ckey(c), 0) > 0 or ckey(c) == cast for c in combo):
+                cur['whole'][str(i)] = cur['my_turns']
+    def saw(card):
+        k = ckey(card)
+        if k in WATCH and k not in cur['seen']: cur['seen'].append(k)
     for line in out.splitlines():
+        m = ZONE.match(line)
+        if m:
+            if int(m.group(2)) == me:
+                k = ckey(m.group(3).strip())
+                cur['bf'][k] = max(0, cur['bf'].get(k, 0) + (1 if m.group(1) == 'ENTER' else -1))
+                if m.group(1) == 'ENTER': saw(m.group(3)); check()
+            continue
         m = TURN.match(line)
         if m:
             cur['turns'] = int(m.group(1))
@@ -259,12 +319,14 @@ def parse(out, decks, names, mine=DECK):
             if m.group(1) == 'Land' and cur['my_turns'] <= 6: cur['lands_by_t6'] += 1
             if m.group(1) != 'Land' and cur['my_turns'] <= 4: cur['early'] += 1
             if card == COMMANDER and cur['cmd_turn'] is None: cur['cmd_turn'] = cur['my_turns']
+            if WATCH: saw(card); check(ckey(card))
             continue
         m = MOVE.match(line)
         if m:
             cur['dl'] = True
             if int(m.group(2)) == me:
                 card = m.group(3).strip()
+                if m.group(1) == 'DRAW': saw(card)
                 if cur['turns'] == 0:
                     # Before the first turn: the opening hand, mulligans included (a hand put back leaves it again).
                     if m.group(1) == 'DRAW': cur['open'].append(card)
@@ -355,6 +417,8 @@ def play_stage(work, lib):
         print('\n'.join(lines[:90])); print('...'); print('\n'.join(lines[-120:]))
         print('=== SMOKE: the first damage and mulligan lines ===')
         print('\n'.join([l for l in lines if l.startswith(('Damage:', 'Mulligan:'))][:12]))
+        print('=== SMOKE: combo pieces on and off the battlefield ===')
+        print('\n'.join([l for l in lines if ZONE.match(l)][:40]))
         g = parse(out, pods[0], lib)
         print('=== SMOKE: read from it ===', json.dumps(g)[:3000])
         # Does a seed repeat a game? The same table twice on one seed, once on another: opening hands and outcomes.
@@ -386,8 +450,9 @@ def play_stage(work, lib):
             global LOGMORE
             def sit(n, sd, limit):
                 global LOGMORE
-                out = play(work, seats, n, quiet=False, slot=k, limit=limit, seed=sd)[0]
+                out, secs = play(work, seats, n, quiet=False, slot=k, limit=limit, seed=sd)
                 gs = parse(out, seats, lib, mine)
+                for g in gs: g['wall'] = round(secs / max(1, len(gs)), 1)
                 if LOGMORE and not gs and 'TABLE STOPPED' not in out and re.search(r'Exception|Error', out[-3000:]):
                     print('fuller log: a table failed with it, playing on without:', out[-400:].replace('\n', ' | '), flush=True)
                     LOGMORE = None
@@ -650,6 +715,28 @@ def merge_stage(work, lib):
                 'first': first_cards(mine),
                 'held_turns': HELD_TURNS, 'held': held_results(mine, deck_cards),
             })
+    summary['mc_seats'] = MC_SEATS if MC in ('on', 'max') else None
+    summary['taught'] = TEACH and bool(COMBOS)
+    walls = sorted(g['wall'] for p in parts for g in p['games'] if g.get('wall'))
+    if walls:
+        # A game's wall time includes starting Forge for it; its own time is what Forge reports.
+        own = sum(ms) / 1000
+        summary['timing'] = {'games': len(walls), 'wall_s_sum': round(sum(walls)), 'game_s_sum': round(own),
+                             'start_up_s_per_game': round((sum(walls) - own) / len(walls), 1),
+                             'wall_s_median': walls[len(walls) // 2], 'wall_s_p90': walls[int(len(walls) * .9)],
+                             'turns_median': sorted(g['turns'] for p in parts for g in p['games'])[total // 2] if total else None,
+                             'over_5_min': sum(1 for x in ms if x > 300000), 'over_10_min': sum(1 for x in ms if x > 600000)}
+    if COMBOS and mine:
+        rows = []
+        for i, combo in enumerate(COMBOS):
+            k = str(i); keys = [ckey(c) for c in combo]
+            chance = [g for g in mine if all(x in g.get('seen', []) for x in keys)]
+            whole = [g for g in mine if k in g.get('whole', {})]
+            soon = [g for g in whole if g['me_won'] and g['my_turns'] - g['whole'][k] <= 1]
+            rows.append({'cards': combo, 'all_pieces_seen': len(chance), 'put_together': len(whole),
+                         'put_together_and_won': sum(g['me_won'] for g in whole), 'won_within_a_turn': len(soon),
+                         'turn_median': sorted(g['whole'][k] for g in whole)[len(whole) // 2] if whole else None})
+        summary['combos'] = {'games': len(mine), 'watched': bool(any(g.get('bf') for g in mine)), 'rows': rows}
     print('=== DECK SIM SUMMARY ==='); print(json.dumps(summary, indent=1)); print('=== END SUMMARY ===')
     try: print_ai_cannot(blank)
     except Exception as e: print('list of cards without computer play not printed: %s' % e)

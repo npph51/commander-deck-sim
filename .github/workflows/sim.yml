@@ -62,6 +62,15 @@ on:
       skip:
         description: 'Tables of the seeded deal to pass over, so a second part of a test plays the next ones'
         default: '0'
+      mc_seats:
+        description: 'With mc on: all (every seat) or ours (only the deck under test; the others on a profile without it)'
+        default: 'all'
+      combos:
+        description: 'Combos to follow in the deck under test, as JSON [[card, card, ...], ...]'
+        default: ''
+      teach:
+        description: 'on = also write those combos into Forge''s own list of combos (ai-combos.txt)'
+        default: ''
 permissions:
   contents: read
 env:
@@ -80,6 +89,9 @@ env:
   SWAPS: ${{ inputs.swaps }}
   AVERAGE: ${{ inputs.average }}
   EXTRA: ${{ inputs.extra }}
+  MC_SEATS: ${{ inputs.mc_seats }}
+  COMBOS: ${{ inputs.combos }}
+  TEACH: ${{ inputs.teach }}
 jobs:
   # Fetches Forge's release once (kept in the cache per release) and says how many machines play.
   setup:
