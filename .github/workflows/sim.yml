@@ -57,7 +57,7 @@ on:
         description: 'ladder: commanders whose average decks sit down beside the premium precons, names separated by |'
         default: ''
       swaps:
-        description: 'test: card swaps to try side by side, as JSON [[card out, card in], ...]; each table plays a random half of them'
+        description: 'test: card swaps to try side by side, as JSON [[card out, card in], ...] (a group made as one: [[out, in], [out, in]]); each table plays a random half of them'
         default: ''
       skip:
         description: 'Tables of the seeded deal to pass over, so a second part of a test plays the next ones'

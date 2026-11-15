@@ -62,7 +62,12 @@ PRECONS = POOLS['all'] if os.environ.get('MODE') == 'ladder' else POOLS[POOL]
 # A trial (mode test): card swaps to try side by side, as JSON [[card out, card in], ...] in the deck file's own names
 # (at most 16). Each table plays the deck with a random half of them made (every swap at half the tables, seeded), and
 # the summary says how the deck finished per combination, so each swap's own effect can be worked out from one run.
-try: SWAPS = [[str(a), str(b)] for a, b in json.loads(os.environ.get('SWAPS') or '[]')][:16]
+# A swap may also be a group of swaps that only work together, [[out, in], [out, in]], made or left as one.
+def _group(x):
+    if isinstance(x, list) and x and all(isinstance(p, list) for p in x): return [[str(a), str(b)] for a, b in x]
+    a, b = x
+    return [[str(a), str(b)]]
+try: SWAPS = [_group(x) for x in json.loads(os.environ.get('SWAPS') or '[]')][:16]
 except Exception: SWAPS = []
 # Every table plays on its own fixed random seed (from SEED and the table's place in the deal), so the same table of
 # another run of this deck starts from the same shuffles: two versions of a list then meet the same opening hands at
@@ -308,10 +313,11 @@ def swapped(work, mask):
     f = os.path.join(work, name)
     if not os.path.exists(f):
         lines = open(os.path.join(work, DECK), encoding='utf-8').read().split('\n')
-        for j, (out, into) in enumerate(SWAPS):
+        for j, group in enumerate(SWAPS):
             if not mask >> j & 1: continue
-            for k, l in enumerate(lines):
-                if l.strip() == '1 ' + out: lines[k] = '1 ' + into; break
+            for out, into in group:
+                for k, l in enumerate(lines):
+                    if l.strip() == '1 ' + out: lines[k] = '1 ' + into; break
         open(f, 'w', encoding='utf-8').write('\n'.join(lines))
     return name
 
