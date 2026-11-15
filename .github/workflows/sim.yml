@@ -74,6 +74,9 @@ on:
       pergame:
         description: 'test: 1 = every game its own Forge start and seed (the default), 0 = one Forge start per table'
         default: '1'
+      opts:
+        description: 'Timing switches, comma-separated: lazy (card scripts read when needed), serialgc, c1. Empty = none'
+        default: ''
 permissions:
   contents: read
 env:
@@ -96,6 +99,7 @@ env:
   COMBOS: ${{ inputs.combos }}
   TEACH: ${{ inputs.teach }}
   PERGAME: ${{ inputs.pergame }}
+  OPTS: ${{ inputs.opts }}
 jobs:
   # Fetches Forge's release once (kept in the cache per release) and says how many machines play.
   setup:

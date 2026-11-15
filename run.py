@@ -22,6 +22,10 @@ WORKERS = max(1, min(8, int(os.environ.get('WORKERS') or 1)))   # tables played 
 # A machine's time budget in minutes (0 = none): past it no new table is started, and GRACE minutes later the tables
 # still playing are stopped and hand in the games they finished, so one stalled table never holds the whole run up.
 BUDGET = max(0, int(os.environ.get('BUDGET') or 0)); GRACE = 10
+# Switches for timing tests (comma-separated, empty = none): lazy = Forge reads a card's script only when a deck needs it
+# (its own preference LOAD_CARD_SCRIPTS_LAZILY, off by default), serialgc / c1 = JVM flags (one garbage-collector thread;
+# the quick compiler only).
+OPTS = {x.strip() for x in (os.environ.get('OPTS') or '').split(',') if x.strip()}
 SKIP = max(0, min(2000, int(os.environ.get('SKIP') or 0)))   # tables of the seeded deal to pass over: a second part plays the next ones
 PROFILE = os.environ.get('PROFILE', '')          # Forge AI profile for every seat ('' = its default)
 MC = os.environ.get('MC', '')                    # Forge's Flat Monte Carlo layer: on, max or off ('' = Forge's default in simulations, off)
@@ -269,6 +273,15 @@ def log_more():
     except Exception as e:
         print('fuller log: not available,', repr(e)[:300], flush=True)
 
+def lazy_prefs(home):
+    """Forge's preference file in this home (Linux: ~/.forge/preferences/forge.preferences) with lazy card loading on."""
+    f = os.path.join(home, '.forge', 'preferences', 'forge.preferences')
+    text = open(f, encoding='utf-8').read() if os.path.exists(f) else ''
+    if 'LOAD_CARD_SCRIPTS_LAZILY=true' in text: return
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    text = re.sub(r'(?m)^LOAD_CARD_SCRIPTS_LAZILY=.*\n?', '', text)
+    open(f, 'w', encoding='utf-8').write(text + ('' if not text or text.endswith('\n') else '\n') + 'LOAD_CARD_SCRIPTS_LAZILY=true\n')
+
 def play(work, decks, games, quiet=True, slot=0, limit=None, seed=None):
     java = java_bin()
     run = [*LOGMORE[0], '-cp', LOGMORE[1], LOGMORE[2]] if LOGMORE else ['-jar', jar()]
@@ -283,6 +296,8 @@ def play(work, decks, games, quiet=True, slot=0, limit=None, seed=None):
     if ONEJVM_OK: cmd = cmd[:3] + ['-Dcs.pergame=1'] + cmd[3:]
     if WATCH: cmd = cmd[:3] + ['-Dcs.watch=' + '|'.join(sorted(set(WATCH.values())))] + cmd[3:]
     if quiet: cmd.append('-q')
+    if 'serialgc' in OPTS: cmd = cmd[:3] + ['-XX:+UseSerialGC'] + cmd[3:]
+    if 'c1' in OPTS: cmd = cmd[:3] + ['-XX:TieredStopAtLevel=1'] + cmd[3:]
     t = time.time()
     # Tables side by side each get a home of their own, so two JVMs never write the same preference or cache files.
     env = dict(os.environ)
@@ -290,6 +305,7 @@ def play(work, decks, games, quiet=True, slot=0, limit=None, seed=None):
         home = os.path.join(os.getcwd(), 'homes', str(slot)); os.makedirs(home, exist_ok=True)
         env['HOME'] = home
         cmd = cmd[:3] + ['-Duser.home=' + home] + cmd[3:]
+    if 'lazy' in OPTS: lazy_prefs(env.get('HOME') or os.path.expanduser('~'))
     # Its own process group, so a table stopped at the limit takes its JVM with it and what it printed so far is kept.
     most = games * (CLOCK + 60) + 600
     p = subprocess.Popen(cmd, cwd=FORGE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
@@ -851,6 +867,7 @@ def merge_stage(work, lib):
                 'held_turns': HELD_TURNS, 'held': held_results(mine, deck_cards),
             })
     summary['mc_seats'] = MC_SEATS if MC in ('on', 'max') else None
+    summary['opts'] = sorted(OPTS) or None
     summary['taught'] = TEACH and bool(COMBOS)
     walls = sorted(g['wall'] for p in parts for g in p['games'] if g.get('wall'))
     if walls:
