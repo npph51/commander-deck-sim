@@ -723,4 +723,4 @@ def main():
     if STAGE in ('play', 'all'): play_stage(work, lib)
     if STAGE in ('merge', 'all'): merge_stage(work, lib)
 
-main()
+if __name__ == '__main__': main()

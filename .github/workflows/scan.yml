@@ -1,0 +1,27 @@
+# Which average decks hold which combos (combos_scan.py). Started by hand only; no secrets.
+name: Combo scan
+run-name: Combo scan ${{ inputs.tag }}
+on:
+  workflow_dispatch:
+    inputs:
+      commanders:
+        description: 'Commander names as a JSON list'
+        default: '[]'
+      tag:
+        description: 'A number the starter gives the run, shown in its name'
+        default: ''
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan
+        env:
+          COMMANDERS: ${{ inputs.commanders }}
+          MODE: scan
+        run: python3 -I combos_scan.py
