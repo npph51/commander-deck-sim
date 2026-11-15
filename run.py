@@ -93,6 +93,10 @@ def table_seed(i): return 1 + (SEED * 100003 + i * 7919) % 2000000000
 # Every game of a table on a seed of its own (one Forge start per game), so the same game of another run of the deck
 # is dealt the same way: lists are then compared game by game. Game 0 keeps the table's seed, as runs before had it.
 PERGAME = FSEED and os.environ.get('PERGAME', '1') != '0'
+# PERGAME=2: the same per-game seeds, but one Forge start per table (a patched copy of Forge's SimulateMatch reseeds and
+# starts a new match before each game, -Dcs.pergame); falls back to a start per game when the patch does not compile.
+ONEJVM = PERGAME and os.environ.get('PERGAME') == '2'
+ONEJVM_OK = False
 def game_seed(base, g): return base if not g else 1 + (base * 31 + g * 104729) % 2000000000
 AVERAGE = (os.environ.get('AVERAGE') or '').strip()
 EXTRA = [x.strip() for x in (os.environ.get('EXTRA') or '').split('|') if x.strip()]
@@ -205,6 +209,19 @@ WATCH_JAVA = """if (ev.card() != null && (from == ZoneType.Battlefield) != (to =
         }
         """
 DMG_OLD = 'return new GameLogEntry(GameLogEntryType.DAMAGE, message, ev.source());'
+SIM_LOOP = '''            for (int iGame = 0; iGame < nGames; iGame++) {
+                simulateSingleMatch(mc, iGame, outputGamelog);
+            }'''
+SIM_LOOP_NEW = '''            final String perGame = System.getProperty("cs.pergame");
+            for (int iGame = 0; iGame < nGames; iGame++) {
+                Match m = mc;
+                if (perGame != null && seed != null) {
+                    long s = iGame == 0 ? seed : 1 + Math.floorMod(seed * 31 + iGame * 104729L, 2000000000L);
+                    MyRandom.setRandom(new Random(s));
+                    m = new Match(rules, pp, "Test");
+                }
+                simulateSingleMatch(m, iGame, outputGamelog);
+            }'''
 DMG_NEW = 'return new GameLogEntry(GameLogEntryType.DAMAGE, message + " {by|" + (ev.source() == null ? "|" : ev.source().getController() + "|" + ev.source().getName()) + "|" + ev.amount() + "|" + ev.target() + "}", ev.source());'
 
 def log_more():
@@ -222,6 +239,15 @@ def log_more():
         opens = re.search(r'(?m)^Add-Opens: *(.*)$', man)
         flags = [x for o in (opens.group(1).split() if opens else []) for x in ('--add-opens', o + '=ALL-UNNAMED')]
         base = os.path.join(os.getcwd(), 'logmore')
+        extra = []
+        if ONEJVM:
+            try:
+                sm = urllib.request.urlopen('https://raw.githubusercontent.com/Card-Forge/forge/forge-%s/forge-gui-desktop/src/main/java/forge/view/SimulateMatch.java' % v, timeout=60).read().decode('utf-8')
+                if sm.count(SIM_LOOP) == 1:
+                    os.makedirs(os.path.join(base, 'sim'), exist_ok=True)
+                    f2 = os.path.join(base, 'sim', 'SimulateMatch.java'); open(f2, 'w', encoding='utf-8').write(sm.replace(SIM_LOOP, SIM_LOOP_NEW)); extra = [f2]
+                else: print('one Forge start per table: the game loop is not as expected', flush=True)
+            except Exception as e: print('one Forge start per table: not available,', repr(e)[:200], flush=True)
         for k, (with_watch, with_damage) in enumerate(((True, True), (False, True), (False, False))):
             text = src.replace(DRAW_AT, (WATCH_JAVA if with_watch else '') + DRAW_JAVA + DRAW_AT)
             if with_damage:
@@ -229,8 +255,14 @@ def log_more():
                 text = text.replace(DMG_OLD, DMG_NEW)
             d = os.path.join(base, str(k)); os.makedirs(os.path.join(d, 'src'), exist_ok=True)
             f = os.path.join(d, 'src', 'GameLogFormatter.java'); open(f, 'w', encoding='utf-8').write(text)
-            r = subprocess.run([java_bin('javac'), '-nowarn', '-cp', j, '-d', os.path.join(d, 'classes'), f], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([java_bin('javac'), '-nowarn', '-cp', j, '-d', os.path.join(d, 'classes'), f, *extra], capture_output=True, text=True, timeout=300)
+            if r.returncode != 0 and extra:
+                print('one Forge start per table: did not compile, a start per game:', r.stderr[-400:], flush=True); extra = []
+                r = subprocess.run([java_bin('javac'), '-nowarn', '-cp', j, '-d', os.path.join(d, 'classes'), f], capture_output=True, text=True, timeout=300)
             if r.returncode == 0:
+                global ONEJVM_OK
+                ONEJVM_OK = bool(extra)
+                if extra: print('one Forge start per table, reseeded per game', flush=True)
                 LOGMORE = [flags, os.path.join(d, 'classes') + os.pathsep + j, main]
                 print('fuller log: draws%s%s (Forge %s)' % (' and damage by player' if with_damage else '', ', combo pieces on the battlefield' if with_watch else '', v), flush=True); return
             print('fuller log: did not compile:', r.stderr[-600:], flush=True)
@@ -248,6 +280,7 @@ def play(work, decks, games, quiet=True, slot=0, limit=None, seed=None):
         cmd += ['-a', *[(PROFILE or 'Default') if m else 'NoMC' for m in mineAt]]
     elif PROFILE: cmd += ['-a', *([PROFILE] * len(decks))]
     if MC in ('on', 'max', 'off'): cmd += ['-mc', MC]
+    if ONEJVM_OK: cmd = cmd[:3] + ['-Dcs.pergame=1'] + cmd[3:]
     if WATCH: cmd = cmd[:3] + ['-Dcs.watch=' + '|'.join(sorted(set(WATCH.values())))] + cmd[3:]
     if quiet: cmd.append('-q')
     t = time.time()
@@ -464,7 +497,10 @@ def play_stage(work, lib):
                     out = play(work, seats, n, quiet=False, slot=k, limit=limit, seed=sd)[0]
                     gs = parse(out, seats, lib, mine)
                 return out, gs
-            if PERGAME and seed and MODE == 'test':
+            if ONEJVM_OK and seed and MODE == 'test':
+                out, gs = sit(GAMES, seed, left)
+                for gi, g in enumerate(gs): g['game'] = gi; g['seed'] = game_seed(seed, gi)
+            elif PERGAME and seed and MODE == 'test':
                 gs = []; out = ''
                 for gi in range(GAMES):
                     # No new game after the budget either; the one playing gets the grace, as a table did.
