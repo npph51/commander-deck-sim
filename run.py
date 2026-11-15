@@ -307,6 +307,20 @@ DRAW = re.compile(r'Game Result: Game (\d+) ended in a Draw! Took (\d+) ms')
 TURN = re.compile(r'^Turn: Turn (\d+) \(Ai\((\d+)\)-')
 ACT = re.compile(r'^(Land|Add To Stack): Ai\((\d+)\)-.*? (played|cast) (.+?)(?: \(\d+\))?(?: targeting .*)?$')
 LOST = re.compile(r'^Game Outcome: Ai\((\d+)\)-.* has lost')
+# How each player went out (Forge's own loss reasons, PlayerOutcome, en-US): "has lost because life total reached 0",
+# "… trying to draw cards from empty library", "… of obtaining 10 poison counters", "… accumulation of 21 damage from
+# generals", "… an opponent has won by spell 'X'", "… due to effect of spell 'X'", "has conceded"; the winner "has won
+# because all opponents have lost" or "has won due to effect of 'X'". All printed at the end of the game, in the order
+# the players went out.
+OUT = re.compile(r'^Game Outcome: Ai\((\d+)\)-.*? has (lost|conceded|won)\b(.*)$')
+# Damage to a player (GameEventPlayerDamaged): "<card> deals 3 combat damage to Ai(2)-… (as poison counters)."; it
+# becomes lost life afterwards, in one "Life" line for all damage dealt at once (Player.simultaneousDamage).
+PDMG = re.compile(r' deals (\d+) (combat|non-combat) damage to Ai\((\d+)\)-')
+LIFE = re.compile(r'^Life: (?:Life: )?.*?Ai\((\d+)\)-.*? (-?\d+) > (-?\d+)\s*$')
+STACK = re.compile(r'^Add To Stack: Ai\((\d+)\)-.*? (?:cast|activated|triggered) (.+?)(?: targeting .*)?$')
+QUOTED = re.compile(r"'+(.+?)'+\s*\.?\s*$")
+# How a player went out, as the summary counts them.
+ENDS = ('combat', 'commander', 'burn', 'drain', 'poison', 'alt_win', 'spell', 'milled', 'conceded', 'life', 'other')
 # Only with the fuller log (log_more): a card to or from a hand, and damage with the player whose card dealt it.
 MOVE = re.compile(r'^[^:]+: (DRAW|BACK)\|Ai\((\d+)\)-[^|]*\|(.*)$')
 ZONE = re.compile(r'^[^:]+: (ENTER|LEAVE)\|Ai\((\d+)\)-[^|]*\|(?:(-?\d+)\|)?(.*)$')
@@ -320,7 +334,35 @@ def parse(out, decks, names, mine=DECK):
     games = []; cur = None
     def fresh(): return {'me': me, 'turns': 0, 'my_turns': 0, 'cast': {}, 'first': {}, 'lands_by_t6': 0, 'cmd_turn': None, 'early': 0, 'lost_order': [], 'timeout': False,
                           'open': [], 'top': [], 'mull': 0, 'dl': False, 'dealt': {}, 'hit': 0, 'hit6': 0,
-                          'bf': {}, 'on': {}, 'seen': [ckey(COMMANDER)] if COMMANDER and ckey(COMMANDER) in WATCH else [], 'whole': {}}
+                          'bf': {}, 'on': {}, 'seen': [ckey(COMMANDER)] if COMMANDER and ckey(COMMANDER) in WATCH else [], 'whole': {},
+                          # How each player went out: [seat, how (ENDS), the seat that put it out (0 = not known), card].
+                          'outs': [], 'alt': None,
+                          # Working state for `outs`, dropped when the game is done.
+                          '_pend': {}, '_zero': {}, '_cb': {}, '_inf': {}, '_actor': 0, '_by_card': {}}
+    def done(g):
+        # Who won by an alternative win put the others out.
+        if g.get('winner_seat'):
+            for o in g['outs']:
+                if o[1] == 'alt_win' and not o[2]: o[2] = g['winner_seat']
+        for k in [k for k in g if k.startswith('_')]: del g[k]
+        g.pop('winner_seat', None)
+        games.append(g)
+    def went_out(seat, what, rest):
+        if what == 'won':
+            q = QUOTED.search(rest) if 'effect of' in rest else None
+            if q: cur['alt'] = q.group(1)
+            return
+        q = QUOTED.search(rest); card = q.group(1) if q else ''
+        if what == 'conceded': how, by = 'conceded', 0
+        elif 'life total' in rest:
+            how, by, card = cur['_zero'].get(seat) or ('life', 0, '')
+        elif 'empty library' in rest: how, by = 'milled', 0
+        elif 'poison' in rest: how, by = 'poison', cur['_inf'].get(seat, 0)
+        elif 'damage from generals' in rest: how, by = 'commander', cur['_cb'].get(seat, 0)
+        elif 'has won by spell' in rest: how, by = 'alt_win', cur['_by_card'].get(card, 0)
+        elif 'effect of spell' in rest: how, by = 'spell', cur['_by_card'].get(card, 0)
+        else: how, by = 'other', 0
+        cur['outs'].append([seat, how, by, card])
     cur = fresh()
     def check(cast=None):
         # Every piece on the battlefield, or (a spell piece) cast just now while the others are there.
@@ -349,6 +391,9 @@ def parse(out, decks, names, mine=DECK):
             cur['turns'] = int(m.group(1))
             if int(m.group(2)) == me: cur['my_turns'] += 1
             continue
+        if line.startswith('Add To Stack:'):
+            s = STACK.match(line)
+            if s: cur['_actor'] = int(s.group(1)); cur['_by_card'][s.group(2).strip()] = int(s.group(1))
         m = ACT.match(line)
         if m and int(m.group(2)) == me:
             card = m.group(4).strip()
@@ -383,17 +428,41 @@ def parse(out, decks, names, mine=DECK):
                     cur['hit'] += n
                     if cur['my_turns'] <= 6: cur['hit6'] += n
                 elif by == me and m.group(2): cur['dealt'][m.group(2)] = cur['dealt'].get(m.group(2), 0) + n
+            p = PDMG.search(line)
+            if p:
+                by = int(m.group(1) or 0) if m else 0; to = int(p.group(3)); combat = p.group(2) == 'combat'
+                if 'poison counter' in line: cur['_inf'][to] = by
+                else:
+                    cur['_pend'].setdefault(to, []).append((int(p.group(1)), combat, by, m.group(2) if m else ''))
+                    if combat: cur['_cb'][to] = by
             continue
-        m = LOST.match(line)
-        if m: cur['lost_order'].append(int(m.group(1))); continue
+        if line.startswith('Life:'):
+            m = LIFE.match(line)
+            if m:
+                s, old, new = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                if new < old:
+                    hits = cur['_pend'].pop(s, [])
+                    if old > 0 >= new:
+                        # Damage just dealt to the player is what took the life; else it was life lost (drain, paying
+                        # life), put out by whoever put the last thing on the stack (close, not certain).
+                        if hits:
+                            big = max(hits, key=lambda h: h[0])
+                            cur['_zero'][s] = ('combat' if any(h[1] for h in hits) else 'burn', big[2], big[3])
+                        else: cur['_zero'][s] = ('drain', cur['_actor'], '')
+            continue
+        m = OUT.match(line)
+        if m:
+            went_out(int(m.group(1)), m.group(2), m.group(3))
+            if m.group(2) == 'lost': cur['lost_order'].append(int(m.group(1)))
+            continue
         if 'Stopping slow match as draw' in line: cur['timeout'] = True; continue
         m = RES.search(line)
         if m:
             w = re.match(r'Ai\((\d+)\)-', m.group(3))
-            cur.update(ms=int(m.group(2)), winner=decks[int(w.group(1)) - 1] if w else m.group(3), me_won=bool(w and int(w.group(1)) == me))
-            games.append(cur); cur = fresh(); continue
+            cur.update(ms=int(m.group(2)), winner=decks[int(w.group(1)) - 1] if w else m.group(3), me_won=bool(w and int(w.group(1)) == me), winner_seat=int(w.group(1)) if w else 0)
+            done(cur); cur = fresh(); continue
         m = DRAW.search(line)
-        if m: cur.update(ms=int(m.group(2)), winner=None, me_won=False); games.append(cur); cur = fresh()
+        if m: cur.update(ms=int(m.group(2)), winner=None, me_won=False); done(cur); cur = fresh()
     return games
 
 def wilson(k, n, z=1.96):
@@ -518,7 +587,8 @@ def play_stage(work, lib):
                     # Whatever combination it played, the record names our deck the same way.
                     if g['winner'] == mine: g['winner'] = DECK
                     g['decks'] = ds; g['mask'] = mask; g['table'] = index_of.get(id(ds)); recs.append(g)
-                    print('game', len(recs), [lib.get(d, d) for d in ds], '->', lib.get(g['winner'], g['winner']), 'turn', g['turns'], round(g['ms'] / 1000), 's', 'TIMEOUT' if g['timeout'] else '', flush=True)
+                    print('game', len(recs), [lib.get(d, d) for d in ds], '->', lib.get(g['winner'], g['winner']), 'turn', g['turns'], round(g['ms'] / 1000), 's', 'TIMEOUT' if g['timeout'] else '',
+                          'out:', ' '.join('%d:%s<%s' % (o[0], o[1], o[2] or '?') for o in g.get('outs', [])) + (' alt:' + g['alt'] if g.get('alt') else ''), flush=True)
                 save()
         finally: slots.put(k)
     with ThreadPoolExecutor(WORKERS) as ex: list(ex.map(one, pods))
@@ -671,6 +741,28 @@ def versus(mine, lib):
             if mine_at is not None and (seat not in order or order.index(seat) > mine_at): r[4] += 1
     return sorted(rows.values(), key=lambda r: -r[1])
 
+def ends_of(mine):
+    """How the tested deck's games ended, from Forge's loss reasons (`outs`): `won` = how the last opponent went out in
+    the games it won, `lost` = how it went out itself, `knocked_out` = the opponents it put out itself, each {how: games}
+    with how in ENDS. `by_known` = how many opponents' outs name who put them out (the damage's controller needs the
+    fuller log). None before the outs were read."""
+    gs = [g for g in mine if g.get('outs')]
+    if not gs: return None
+    won, lost, ko = {}, {}, {}
+    known = opp = 0
+    add = lambda d, k: d.__setitem__(k, d.get(k, 0) + 1)
+    for g in gs:
+        me = g['me']
+        if g['me_won']:
+            last = [o for o in g['outs'] if o[0] != me][-1:]
+            if last: add(won, last[0][1])
+        for o in g['outs']:
+            if o[0] == me: add(lost, o[1]); continue
+            opp += 1
+            if o[2]: known += 1
+            if o[2] == me: add(ko, o[1])
+    return {'games': len(gs), 'won': won, 'lost': lost, 'knocked_out': ko, 'opponents_out': opp, 'by_known': known}
+
 def merge_stage(work, lib):
     parts = [json.load(open(f)) for f in sorted(glob.glob('records/**/*.json', recursive=True))]
     stats = {}; total = draws = 0; ms = []; mine = []; casts = {}
@@ -722,6 +814,8 @@ def merge_stage(work, lib):
             # Where our deck finished: [won, second, third, first out]; games that ended in a draw are in none.
             'places': places(mine),
             'win_turn_median': med([g['turns'] for g in mine if g['me_won']]),
+            # How its games ended (combat, commander damage, burn, drain …): ends_of.
+            'ends': ends_of(mine),
             # Per opponent: [name, games at one table with it, of which our deck won, of which it won, games our deck was out before it].
             'vs': versus(mine, lib),
             'levers': levers(mine),
