@@ -364,7 +364,9 @@ def parse(out, decks, names, mine=DECK):
                 if o[1] == 'alt_win' and not o[2]: o[2] = g['winner_seat']
         # With the fuller log: what every seat started with, seat -> its kept opening hand then its next TOP draws
         # (the tested deck's own are `open` + `top`, the same cards).
-        if g['dl']: g['seats'] = {str(s): g['_so'].get(s, []) + g['_st'].get(s, []) for s in range(1, len(decks) + 1)}
+        if g['dl']:
+            g['seats'] = {str(s): g['_so'].get(s, []) + g['_st'].get(s, []) for s in range(1, len(decks) + 1)}
+            g['win_seat'] = g.get('winner_seat') or 0   # 0 = nobody (a draw, or stopped at the clock)
         for k in [k for k in g if k.startswith('_')]: del g[k]
         g.pop('winner_seat', None)
         games.append(g)
@@ -565,7 +567,7 @@ def play_stage(work, lib):
         print('=== SMOKE: read from it ===', json.dumps(g)[:3000])
         for x in g:
             ours = (x.get('seats') or {}).get(str(x['me']))
-            print('=== SMOKE: seats ===', json.dumps(x.get('seats')), '| seat', x['me'], 'is open + top:', ours == x['open'] + x['top'], flush=True)
+            print('=== SMOKE: seats ===', json.dumps(x.get('seats')), '| seat', x['me'], 'is open + top:', ours == x['open'] + x['top'], '| win_seat', x.get('win_seat'), '| winner', x.get('winner'), flush=True)
         # Does a seed repeat a game? The same table twice on one seed, once on another: opening hands and outcomes.
         for label, sd in (('seed 4242', 4242), ('seed 4242 again', 4242), ('seed 99', 99)):
             o2, _ = play(work, pods[0], 2, quiet=False, seed=sd)
@@ -967,7 +969,7 @@ def print_ai_cannot(names):
 def print_games(parts, lib, summary):
     """Every game as it was read, for whoever started the run to keep: one line of JSON for the run, then one per
     game (the decks by seat, the winner, who went out in which order, for the tested deck what it drew, played and
-    took, and from version 2 on `seats`: every seat's kept opening hand and next draws), gzipped and printed as base64
+    took, and from version 2 on `seats`: every seat's kept opening hand and next draws, with `win_seat`), gzipped and printed as base64
     between two markers. Nothing is stored here."""
     import base64, gzip
     head = {'v': 2, 'kind': 'run', **{k: summary.get(k) for k in ('mode', 'pool', 'pods', 'games_per_pod', 'clock_s', 'profile', 'workers', 'budget_min', 'skip', 'average', 'games')},
