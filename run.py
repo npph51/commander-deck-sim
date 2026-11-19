@@ -354,12 +354,17 @@ def parse(out, decks, names, mine=DECK):
                           # How each player went out: [seat, how (ENDS), the seat that put it out (0 = not known), card].
                           'outs': [], 'alt': None,
                           # Working state for `outs`, dropped when the game is done.
-                          '_pend': {}, '_zero': {}, '_cb': {}, '_inf': {}, '_actor': 0, '_by_card': {}, '_life': {}}
+                          '_pend': {}, '_zero': {}, '_cb': {}, '_inf': {}, '_actor': 0, '_by_card': {}, '_life': {},
+                          # Every seat's kept opening hand and its next TOP draws, for `seats`.
+                          '_so': {}, '_st': {}}
     def done(g):
         # Who won by an alternative win put the others out.
         if g.get('winner_seat'):
             for o in g['outs']:
                 if o[1] == 'alt_win' and not o[2]: o[2] = g['winner_seat']
+        # With the fuller log: what every seat started with, seat -> its kept opening hand then its next TOP draws
+        # (the tested deck's own are `open` + `top`, the same cards).
+        if g['dl']: g['seats'] = {str(s): g['_so'].get(s, []) + g['_st'].get(s, []) for s in range(1, len(decks) + 1)}
         for k in [k for k in g if k.startswith('_')]: del g[k]
         g.pop('winner_seat', None)
         games.append(g)
@@ -423,8 +428,13 @@ def parse(out, decks, names, mine=DECK):
         m = MOVE.match(line)
         if m:
             cur['dl'] = True
-            if int(m.group(2)) == me:
-                card = m.group(3).strip()
+            seat = int(m.group(2)); card = m.group(3).strip()
+            if cur['turns'] == 0:
+                hand = cur['_so'].setdefault(seat, [])
+                if m.group(1) == 'DRAW': hand.append(card)
+                elif card in hand: hand.remove(card)
+            elif m.group(1) == 'DRAW' and len(cur['_st'].setdefault(seat, [])) < TOP: cur['_st'][seat].append(card)
+            if seat == me:
                 if m.group(1) == 'DRAW': saw(card)
                 if cur['turns'] == 0:
                     # Before the first turn: the opening hand, mulligans included (a hand put back leaves it again).
@@ -553,6 +563,9 @@ def play_stage(work, lib):
         print('\n'.join([l for l in lines if ZONE.match(l)][:40]))
         g = parse(out, pods[0], lib)
         print('=== SMOKE: read from it ===', json.dumps(g)[:3000])
+        for x in g:
+            ours = (x.get('seats') or {}).get(str(x['me']))
+            print('=== SMOKE: seats ===', json.dumps(x.get('seats')), '| seat', x['me'], 'is open + top:', ours == x['open'] + x['top'], flush=True)
         # Does a seed repeat a game? The same table twice on one seed, once on another: opening hands and outcomes.
         for label, sd in (('seed 4242', 4242), ('seed 4242 again', 4242), ('seed 99', 99)):
             o2, _ = play(work, pods[0], 2, quiet=False, seed=sd)
@@ -953,10 +966,11 @@ def print_ai_cannot(names):
 
 def print_games(parts, lib, summary):
     """Every game as it was read, for whoever started the run to keep: one line of JSON for the run, then one per
-    game (the decks by seat, the winner, who went out in which order, and for the tested deck what it drew, played and
-    took), gzipped and printed as base64 between two markers. Nothing is stored here."""
+    game (the decks by seat, the winner, who went out in which order, for the tested deck what it drew, played and
+    took, and from version 2 on `seats`: every seat's kept opening hand and next draws), gzipped and printed as base64
+    between two markers. Nothing is stored here."""
     import base64, gzip
-    head = {'v': 1, 'kind': 'run', **{k: summary.get(k) for k in ('mode', 'pool', 'pods', 'games_per_pod', 'clock_s', 'profile', 'workers', 'budget_min', 'skip', 'average', 'games')},
+    head = {'v': 2, 'kind': 'run', **{k: summary.get(k) for k in ('mode', 'pool', 'pods', 'games_per_pod', 'clock_s', 'profile', 'workers', 'budget_min', 'skip', 'average', 'games')},
             'seed': SEED, 'seeded_tables': FSEED, 'seeded_games': PERGAME, 'swaps': SWAPS, 'top_draws': TOP, 'commander': COMMANDER}
     lines = [json.dumps(head, separators=(',', ':'))]
     for g in (g for p in parts for g in p['games']):
