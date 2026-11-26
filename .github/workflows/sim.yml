@@ -74,6 +74,9 @@ on:
       pergame:
         description: 'test: 1 = every game its own Forge start and seed (the default), 2 = one Forge start per table with every game on its own seed, 0 = one Forge start per table'
         default: '1'
+      forge:
+        description: "Which Forge: blank = Card-Forge's newest release; fork = our fork npph51/forge, branch commander; fork:<branch or commit> = another ref of the fork (built once, then cached by its commit)"
+        default: ''
       opts:
         description: 'Timing switches, comma-separated: lazy (card scripts read when needed), serialgc, c1. Empty = none'
         default: ''
@@ -100,15 +103,17 @@ env:
   TEACH: ${{ inputs.teach }}
   PERGAME: ${{ inputs.pergame }}
   OPTS: ${{ inputs.opts }}
+  FORGE: ${{ inputs.forge }}
 jobs:
   # Fetches Forge's release once (kept in the cache per release) and says how many machines play.
   setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
       count: ${{ steps.plan.outputs.count }}
       tag: ${{ steps.plan.outputs.tag }}
+      src: ${{ steps.plan.outputs.src }}
     steps:
       - id: plan
         env:
@@ -118,16 +123,54 @@ jobs:
           n=$(python3 -c "import os; m=os.environ; print(max(1, min(20, int(m.get('MACHINES') or 20), int(m.get('PODS') or 20))) if m.get('MODE') != 'smoke' else 1)")
           echo "count=$n" >> "$GITHUB_OUTPUT"
           echo "shards=$(python3 -c "import json; print(json.dumps(list(range($n))))")" >> "$GITHUB_OUTPUT"
-          echo "tag=$(gh release view -R Card-Forge/forge --json tagName -q .tagName)" >> "$GITHUB_OUTPUT"
+          case "$FORGE" in
+            fork|fork:*)
+              ref="${FORGE#fork}"; ref="${ref#:}"; ref="${ref:-commander}"
+              sha=$(git ls-remote https://github.com/npph51/forge.git "$ref" | head -1 | cut -f1)
+              [ -n "$sha" ] || sha="$ref"
+              case "$sha" in *[!0-9a-f]*|'') echo "no such ref on the fork: $ref"; exit 1;; esac
+              echo "tag=fork-$sha" >> "$GITHUB_OUTPUT"
+              echo "src=npph51/forge/$sha" >> "$GITHUB_OUTPUT"
+              echo "sha=$sha" >> "$GITHUB_OUTPUT";;
+            '')
+              echo "tag=$(gh release view -R Card-Forge/forge --json tagName -q .tagName)" >> "$GITHUB_OUTPUT"
+              echo "src=" >> "$GITHUB_OUTPUT";;
+            *) echo "forge must be blank, fork or fork:<ref>"; exit 1;;
+          esac
       - id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: forge.tar.bz2
           key: forge-${{ steps.plan.outputs.tag }}
-      - if: steps.cache.outputs.cache-hit != 'true'
+      - if: steps.cache.outputs.cache-hit != 'true' && steps.plan.outputs.sha == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release download -R Card-Forge/forge -p '*.tar.bz2' -O forge.tar.bz2
+      # The fork: built from source once per commit (the desktop jar and its res folder, laid out as the release is).
+      - if: steps.cache.outputs.cache-hit != 'true' && steps.plan.outputs.sha != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: npph51/forge
+          ref: ${{ steps.plan.outputs.sha }}
+          path: forge-src
+          persist-credentials: false
+      - if: steps.cache.outputs.cache-hit != 'true' && steps.plan.outputs.sha != ''
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: forge-src/**/pom.xml
+      - if: steps.cache.outputs.cache-hit != 'true' && steps.plan.outputs.sha != ''
+        name: Build the fork
+        working-directory: forge-src
+        run: |
+          mvn -B -q -pl forge-gui-desktop -am package -DskipTests -Dskip.flatten=true -Dmaven.javadoc.skip=true -T 1C
+          mkdir ../forge-out
+          cp forge-gui-desktop/target/forge-gui-desktop-*-jar-with-dependencies.jar ../forge-out/
+          cp -r forge-gui/res ../forge-out/res
+          ls ../forge-out
+          cd .. && tar -cjf forge.tar.bz2 -C forge-out . && ls -la forge.tar.bz2
   play:
     needs: setup
     runs-on: ubuntu-latest
@@ -148,6 +191,7 @@ jobs:
       - name: Play
         env:
           STAGE: play
+          FORGE_SRC: ${{ needs.setup.outputs.src }}
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ needs.setup.outputs.count }}
         run: |
@@ -184,6 +228,7 @@ jobs:
       - name: Summary
         env:
           STAGE: merge
+          FORGE_SRC: ${{ needs.setup.outputs.src }}
           SHARDS: ${{ needs.setup.outputs.count }}
         run: |
           mkdir forge && tar -xjf forge.tar.bz2 -C forge

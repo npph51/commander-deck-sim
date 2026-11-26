@@ -228,6 +228,11 @@ SIM_LOOP_NEW = '''            final String perGame = System.getProperty("cs.perg
             }'''
 DMG_NEW = 'return new GameLogEntry(GameLogEntryType.DAMAGE, message + " {by|" + (ev.source() == null ? "|" : ev.source().getController() + "|" + ev.source().getName()) + "|" + ev.amount() + "|" + ev.target() + "}", ev.source());'
 
+def src_url(v, path):
+    """Forge's source of the build that plays: the release's tag, or for the fork (FORGE_SRC = npph51/forge/<commit>) that commit."""
+    base = os.environ.get('FORGE_SRC') or ('Card-Forge/forge/forge-%s' % v)
+    return 'https://raw.githubusercontent.com/%s/%s' % (base, path)
+
 def log_more():
     """Tries the fuller log once; says in the run's log what happened."""
     global LOGMORE
@@ -235,7 +240,7 @@ def log_more():
     try:
         j = jar()
         v = re.search(r'forge-gui-desktop-(.+?)-jar-with-dependencies', os.path.basename(j)).group(1)
-        url = 'https://raw.githubusercontent.com/Card-Forge/forge/forge-%s/forge-game/src/main/java/forge/game/GameLogFormatter.java' % v
+        url = src_url(v, 'forge-game/src/main/java/forge/game/GameLogFormatter.java')
         src = urllib.request.urlopen(url, timeout=60).read().decode('utf-8')
         if src.count(DRAW_AT) != 1: raise RuntimeError('the zone-change code is not as expected')
         man = zipfile.ZipFile(j).read('META-INF/MANIFEST.MF').decode('utf-8', 'replace').replace('\r', '').replace('\n ', '')
@@ -246,7 +251,7 @@ def log_more():
         extra = []
         if ONEJVM:
             try:
-                sm = urllib.request.urlopen('https://raw.githubusercontent.com/Card-Forge/forge/forge-%s/forge-gui-desktop/src/main/java/forge/view/SimulateMatch.java' % v, timeout=60).read().decode('utf-8')
+                sm = urllib.request.urlopen(src_url(v, 'forge-gui-desktop/src/main/java/forge/view/SimulateMatch.java'), timeout=60).read().decode('utf-8')
                 if sm.count(SIM_LOOP) == 1:
                     os.makedirs(os.path.join(base, 'sim'), exist_ok=True)
                     f2 = os.path.join(base, 'sim', 'SimulateMatch.java'); open(f2, 'w', encoding='utf-8').write(sm.replace(SIM_LOOP, SIM_LOOP_NEW)); extra = [f2]
@@ -932,7 +937,10 @@ def deck_names(work):
 
 def forge_version():
     m = re.search(r'forge-gui-desktop-(.+?)-jar-with-dependencies', os.path.basename(jar()))
-    return m.group(1) if m else ''
+    v = m.group(1) if m else ''
+    src = os.environ.get('FORGE_SRC') or ''
+    # The fork's builds are told apart by their commit (a snapshot version names no fixed source).
+    return v + '+fork.' + src.rsplit('/', 1)[-1][:10] if src.startswith('npph51/') else v
 
 def ai_cannot():
     """Every card Forge's own script marks as one its computer player has no play for (the line AI:RemoveDeck:All),
